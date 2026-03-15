@@ -23,6 +23,7 @@ from aiogram.types import (
     ReactionTypeEmoji,
     ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
+    WebAppInfo,
 )
 
 import calendar_api
@@ -30,7 +31,7 @@ import analytics
 import db
 import gemini
 import schedule as sched_module
-from config import ADMIN_USER_ID, BOT_TOKEN, FSM_PATH
+from config import ADMIN_USER_ID, BOT_TOKEN, FSM_PATH, WEB_APP_URL
 from storage import JsonStorage
 
 
@@ -82,16 +83,23 @@ BTN_SCHEDULE     = "📅 Моё расписание"
 BTN_SET_SCHEDULE = "✏️ Изменить расписание"
 BTN_CALENDAR     = "🔗 Google Calendar"
 BTN_STATS        = "📊 Нагрузка"
+BTN_WEBAPP       = "🌐 Открыть приложение"
 BUTTON_TEXTS     = {BTN_SCHEDULE, BTN_SET_SCHEDULE, BTN_CALENDAR, BTN_STATS}
 
-MAIN_KB = ReplyKeyboardMarkup(
-    keyboard=[
+def _build_main_kb() -> ReplyKeyboardMarkup:
+    rows = [
         [KeyboardButton(text=BTN_SET_SCHEDULE), KeyboardButton(text=BTN_SCHEDULE)],
         [KeyboardButton(text=BTN_CALENDAR),     KeyboardButton(text=BTN_STATS)],
-    ],
-    resize_keyboard=True,
-    input_field_placeholder="Отправь фото или текст с ДЗ...",
-)
+    ]
+    if WEB_APP_URL:
+        rows.append([KeyboardButton(text=BTN_WEBAPP, web_app=WebAppInfo(url=WEB_APP_URL))])
+    return ReplyKeyboardMarkup(
+        keyboard=rows,
+        resize_keyboard=True,
+        input_field_placeholder="Отправь фото или текст с ДЗ...",
+    )
+
+MAIN_KB = _build_main_kb()
 
 
 # ──────────────────────────────────────────────

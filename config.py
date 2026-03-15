@@ -28,6 +28,8 @@ TOKEN_PATH       = os.path.join(_DATA_DIR, "token.json")
 CREDENTIALS_PATH = os.path.join(_DATA_DIR, "credentials.json")
 FSM_PATH         = os.path.join(_DATA_DIR, "fsm.json")
 
+WEB_APP_URL      = os.getenv("WEB_APP_URL", "")
+
 # Railway/Replit: credentials.json и token.json можно передать через переменные окружения
 _creds_env = os.getenv("GOOGLE_CREDENTIALS_JSON")
 if _creds_env and not os.path.exists(CREDENTIALS_PATH):
