@@ -116,49 +116,49 @@ export default function HomePage() {
         </div>
       </header>
 
-      {/* ── Content ── */}
-      <main className="flex-1 overflow-hidden">
-        <div key={activeTab} className="animate-tab-enter h-full overflow-hidden">
-          {activeTab === 'schedule' && (
-            <ScheduleView
-              homeworks={homeworks}
-              schedule={schedule}
-              loading={loading}
-              onToggle={handleToggle}
-              onOpen={hw => setPreviewHW(hw)}
-              onAddForSubject={() => setActiveTab('add')}
-            />
-          )}
+      {/* ── Content (all tabs stay mounted; opacity crossfade) ── */}
+      <main className="flex-1 overflow-hidden relative">
 
-          {activeTab === 'debts' && (
-            <div className="h-full overflow-y-auto">
-              <HomeworkList
-                homeworks={debtHomeworks}
-                loading={loading}
-                error={error}
-                onToggle={handleToggle}
-                onEdit={handleEdit}
-                emptyMessage="Все задания выполнены!"
-              />
-            </div>
-          )}
-
-          {activeTab === 'load' && (
-            <LoadView homeworks={homeworks} loading={loading} />
-          )}
-
-          {activeTab === 'add' && (
-            <div className="h-full overflow-y-auto">
-              <AddHomeworkForm
-                onSubmit={async data => {
-                  await addNewHomework(data);
-                  haptic('success');
-                  setActiveTab('schedule');
-                }}
-              />
-            </div>
-          )}
+        <div className="absolute inset-0 transition-opacity duration-250 ease-in-out"
+          style={{ opacity: activeTab === 'schedule' ? 1 : 0, pointerEvents: activeTab === 'schedule' ? 'auto' : 'none' }}>
+          <ScheduleView
+            homeworks={homeworks}
+            schedule={schedule}
+            loading={loading}
+            onToggle={handleToggle}
+            onOpen={hw => setPreviewHW(hw)}
+            onAddForSubject={() => setActiveTab('add')}
+          />
         </div>
+
+        <div className="absolute inset-0 overflow-y-auto transition-opacity duration-250 ease-in-out"
+          style={{ opacity: activeTab === 'debts' ? 1 : 0, pointerEvents: activeTab === 'debts' ? 'auto' : 'none' }}>
+          <HomeworkList
+            homeworks={debtHomeworks}
+            loading={loading}
+            error={error}
+            onToggle={handleToggle}
+            onEdit={handleEdit}
+            emptyMessage="Все задания выполнены!"
+          />
+        </div>
+
+        <div className="absolute inset-0 transition-opacity duration-250 ease-in-out"
+          style={{ opacity: activeTab === 'load' ? 1 : 0, pointerEvents: activeTab === 'load' ? 'auto' : 'none' }}>
+          <LoadView homeworks={homeworks} loading={loading} />
+        </div>
+
+        <div className="absolute inset-0 overflow-y-auto transition-opacity duration-250 ease-in-out"
+          style={{ opacity: activeTab === 'add' ? 1 : 0, pointerEvents: activeTab === 'add' ? 'auto' : 'none' }}>
+          <AddHomeworkForm
+            onSubmit={async data => {
+              await addNewHomework(data);
+              haptic('success');
+              setActiveTab('schedule');
+            }}
+          />
+        </div>
+
       </main>
 
       {/* ── Preview modal (from schedule tap) ── */}

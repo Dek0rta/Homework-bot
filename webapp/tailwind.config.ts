@@ -34,10 +34,6 @@ const config: Config = {
           '0%':   { opacity: '0' },
           '100%': { opacity: '1' },
         },
-        'tab-enter': {
-          '0%':   { opacity: '0', transform: 'scale(0.97)' },
-          '100%': { opacity: '1', transform: 'scale(1)' },
-        },
         'tab-badge': {
           '0%':   { transform: 'scale(0.4)', opacity: '0' },
           '60%':  { transform: 'scale(1.15)' },
@@ -48,10 +44,12 @@ const config: Config = {
           '50%':      { opacity: '0.4' },
         },
       },
+      transitionDuration: {
+        '250': '250ms',
+      },
       animation: {
         'slide-up':  'slide-up 0.28s cubic-bezier(0.32, 0.72, 0, 1)',
         'fade-in':   'fade-in 0.2s ease-out',
-        'tab-enter': 'tab-enter 0.2s ease-out',
         'tab-badge': 'tab-badge 0.3s cubic-bezier(0.34, 1.56, 0.64, 1)',
       },
     },
