@@ -34,14 +34,25 @@ const config: Config = {
           '0%':   { opacity: '0' },
           '100%': { opacity: '1' },
         },
+        'tab-enter': {
+          '0%':   { opacity: '0', transform: 'translateY(10px)' },
+          '100%': { opacity: '1', transform: 'translateY(0)' },
+        },
+        'tab-badge': {
+          '0%':   { transform: 'scale(0.5)', opacity: '0' },
+          '60%':  { transform: 'scale(1.2)' },
+          '100%': { transform: 'scale(1)',   opacity: '1' },
+        },
         pulse: {
           '0%, 100%': { opacity: '1' },
           '50%':      { opacity: '0.4' },
         },
       },
       animation: {
-        'slide-up': 'slide-up 0.28s cubic-bezier(0.32, 0.72, 0, 1)',
-        'fade-in':  'fade-in 0.2s ease-out',
+        'slide-up':  'slide-up 0.28s cubic-bezier(0.32, 0.72, 0, 1)',
+        'fade-in':   'fade-in 0.2s ease-out',
+        'tab-enter': 'tab-enter 0.22s cubic-bezier(0.25, 0.46, 0.45, 0.94)',
+        'tab-badge': 'tab-badge 0.3s cubic-bezier(0.34, 1.56, 0.64, 1)',
       },
     },
   },

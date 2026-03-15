@@ -118,45 +118,47 @@ export default function HomePage() {
 
       {/* ── Content ── */}
       <main className="flex-1 overflow-hidden">
-        {activeTab === 'schedule' && (
-          <ScheduleView
-            homeworks={homeworks}
-            schedule={schedule}
-            loading={loading}
-            onToggle={handleToggle}
-            onOpen={hw => setPreviewHW(hw)}
-            onAddForSubject={() => setActiveTab('add')}
-          />
-        )}
-
-        {activeTab === 'debts' && (
-          <div className="h-full overflow-y-auto">
-            <HomeworkList
-              homeworks={debtHomeworks}
+        <div key={activeTab} className="animate-tab-enter h-full overflow-hidden">
+          {activeTab === 'schedule' && (
+            <ScheduleView
+              homeworks={homeworks}
+              schedule={schedule}
               loading={loading}
-              error={error}
               onToggle={handleToggle}
-              onEdit={handleEdit}
-              emptyMessage="Все задания выполнены!"
+              onOpen={hw => setPreviewHW(hw)}
+              onAddForSubject={() => setActiveTab('add')}
             />
-          </div>
-        )}
+          )}
 
-        {activeTab === 'load' && (
-          <LoadView homeworks={homeworks} loading={loading} />
-        )}
+          {activeTab === 'debts' && (
+            <div className="h-full overflow-y-auto">
+              <HomeworkList
+                homeworks={debtHomeworks}
+                loading={loading}
+                error={error}
+                onToggle={handleToggle}
+                onEdit={handleEdit}
+                emptyMessage="Все задания выполнены!"
+              />
+            </div>
+          )}
 
-        {activeTab === 'add' && (
-          <div className="h-full overflow-y-auto">
-            <AddHomeworkForm
-              onSubmit={async data => {
-                await addNewHomework(data);
-                haptic('success');
-                setActiveTab('schedule');
-              }}
-            />
-          </div>
-        )}
+          {activeTab === 'load' && (
+            <LoadView homeworks={homeworks} loading={loading} />
+          )}
+
+          {activeTab === 'add' && (
+            <div className="h-full overflow-y-auto">
+              <AddHomeworkForm
+                onSubmit={async data => {
+                  await addNewHomework(data);
+                  haptic('success');
+                  setActiveTab('schedule');
+                }}
+              />
+            </div>
+          )}
+        </div>
       </main>
 
       {/* ── Preview modal (from schedule tap) ── */}

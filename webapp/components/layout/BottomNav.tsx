@@ -28,25 +28,37 @@ export default function BottomNav({ activeTab, onTabChange, pendingCount }: Bott
           <button
             key={id}
             onClick={() => onTabChange(id)}
-            className="flex-1 flex flex-col items-center justify-center gap-1 py-2.5 relative transition-opacity active:opacity-60"
+            className="flex-1 flex flex-col items-center justify-center gap-1 py-2.5 relative active:opacity-60"
           >
             {id === 'debts' && pendingCount > 0 && (
               <span
                 className="absolute top-1.5 right-[calc(50%-20px)] min-w-[16px] h-4 px-1
-                           rounded-full text-[9px] font-bold leading-4 text-center text-white"
+                           rounded-full text-[9px] font-bold leading-4 text-center text-white
+                           animate-tab-badge"
                 style={{ backgroundColor: '#ff3b30' }}
               >
                 {pendingCount > 99 ? '99+' : pendingCount}
               </span>
             )}
-            <Icon
-              size={22}
-              strokeWidth={active ? 2.4 : 1.6}
-              style={{ color: active ? 'var(--tg-accent)' : 'var(--tg-hint)' }}
-            />
+            <span
+              className="transition-transform duration-200"
+              style={{ transform: active ? 'scale(1.12)' : 'scale(1)' }}
+            >
+              <Icon
+                size={22}
+                strokeWidth={active ? 2.4 : 1.6}
+                style={{
+                  color:      active ? 'var(--tg-accent)' : 'var(--tg-hint)',
+                  transition: 'color 0.2s ease, stroke-width 0.2s ease',
+                }}
+              />
+            </span>
             <span
               className="text-[10px] font-medium"
-              style={{ color: active ? 'var(--tg-accent)' : 'var(--tg-hint)' }}
+              style={{
+                color:      active ? 'var(--tg-accent)' : 'var(--tg-hint)',
+                transition: 'color 0.2s ease',
+              }}
             >
               {label}
             </span>
