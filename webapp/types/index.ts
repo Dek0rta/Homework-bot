@@ -16,7 +16,7 @@ export interface HomeworkWithStatus extends Homework {
   isDone: boolean;
 }
 
-export type TabType = 'schedule' | 'debts' | 'add';
+export type TabType = 'schedule' | 'debts' | 'add' | 'load';
 
 export interface TelegramUser {
   id: number;

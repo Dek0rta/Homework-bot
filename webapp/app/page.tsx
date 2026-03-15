@@ -9,6 +9,7 @@ import HomeworkList                      from '@/components/homework/HomeworkLis
 import HomeworkModal                     from '@/components/homework/HomeworkModal';
 import AddHomeworkForm                   from '@/components/homework/AddHomeworkForm';
 import ScheduleView                      from '@/components/schedule/ScheduleView';
+import LoadView                         from '@/components/load/LoadView';
 
 export default function HomePage() {
   const [activeTab,     setActiveTab]     = useState<TabType>('schedule');
@@ -80,6 +81,7 @@ export default function HomePage() {
     schedule: 'Дневник',
     debts:    'Мои долги',
     add:      'Новое задание',
+    load:     'Нагрузка класса',
   };
 
   const debtHomeworks = homeworks.filter(hw => !hw.isDone);
@@ -138,6 +140,10 @@ export default function HomePage() {
               emptyMessage="Все задания выполнены!"
             />
           </div>
+        )}
+
+        {activeTab === 'load' && (
+          <LoadView homeworks={homeworks} loading={loading} />
         )}
 
         {activeTab === 'add' && (
