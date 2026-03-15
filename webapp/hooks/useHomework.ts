@@ -1,28 +1,33 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
-import { HomeworkWithStatus, AddHomeworkData } from '@/types';
+import { HomeworkWithStatus, AddHomeworkData, ScheduleLesson } from '@/types';
 import {
   fetchHomework,
   fetchUserStatuses,
   setHomeworkStatus,
   addHomework,
+  updateHomework,
+  deleteHomework,
+  fetchSchedule,
 } from '@/lib/api';
 
 export function useHomework(userId: number | null) {
   const [homeworks, setHomeworks] = useState<HomeworkWithStatus[]>([]);
-  const [loading, setLoading]     = useState(true);
-  const [error, setError]         = useState<string | null>(null);
+  const [schedule,  setSchedule]  = useState<ScheduleLesson[]>([]);
+  const [loading,   setLoading]   = useState(true);
+  const [error,     setError]     = useState<string | null>(null);
 
-  // ── Load all homework + this user's statuses ──────────────────────────────
+  // ── Load ──────────────────────────────────────────────────────────────────
   const loadData = useCallback(async () => {
     if (userId === null) return;
     setLoading(true);
     setError(null);
     try {
-      const [hws, statuses] = await Promise.all([
+      const [hws, statuses, sched] = await Promise.all([
         fetchHomework(),
         fetchUserStatuses(userId),
+        fetchSchedule(),
       ]);
 
       const merged: HomeworkWithStatus[] = hws.map(hw => ({
@@ -37,6 +42,7 @@ export function useHomework(userId: number | null) {
       });
 
       setHomeworks(merged);
+      setSchedule(sched);
     } catch {
       setError('Не удалось загрузить задания. Проверь соединение.');
     } finally {
@@ -46,26 +52,19 @@ export function useHomework(userId: number | null) {
 
   useEffect(() => { loadData(); }, [loadData]);
 
-  // ── Toggle done/undone (optimistic update) ────────────────────────────────
+  // ── Toggle done / undone (optimistic) ────────────────────────────────────
   const toggleStatus = useCallback(
     async (homeworkId: string) => {
       if (userId === null) return;
-
-      // Find current state before mutation
       const prev = homeworks.find(h => h.id === homeworkId);
       if (!prev) return;
-
       const nextDone = !prev.isDone;
-
-      // Optimistic
       setHomeworks(list =>
         list.map(hw => hw.id === homeworkId ? { ...hw, isDone: nextDone } : hw),
       );
-
       try {
         await setHomeworkStatus(userId, homeworkId, nextDone);
       } catch {
-        // Revert on failure
         setHomeworks(list =>
           list.map(hw => hw.id === homeworkId ? { ...hw, isDone: prev.isDone } : hw),
         );
@@ -74,26 +73,47 @@ export function useHomework(userId: number | null) {
     [userId, homeworks],
   );
 
-  // ── Add new homework ──────────────────────────────────────────────────────
+  // ── Add ───────────────────────────────────────────────────────────────────
   const addNewHomework = useCallback(
     async (data: AddHomeworkData) => {
       if (userId === null) throw new Error('No user');
       const newHw = await addHomework(userId, data);
-      const withStatus: HomeworkWithStatus = { ...newHw, isDone: false };
-      setHomeworks(list => [withStatus, ...list]);
+      setHomeworks(list => [{ ...newHw, isDone: false }, ...list]);
       return newHw;
     },
     [userId],
   );
 
+  // ── Edit ──────────────────────────────────────────────────────────────────
+  const updateExistingHomework = useCallback(
+    async (id: string, data: AddHomeworkData) => {
+      if (userId === null) throw new Error('No user');
+      const updated = await updateHomework(id, userId, data);
+      setHomeworks(list =>
+        list.map(hw => hw.id === id ? { ...updated, isDone: hw.isDone } : hw),
+      );
+      return updated;
+    },
+    [userId],
+  );
+
+  // ── Delete ────────────────────────────────────────────────────────────────
+  const removeHomework = useCallback(async (id: string) => {
+    await deleteHomework(id);
+    setHomeworks(list => list.filter(hw => hw.id !== id));
+  }, []);
+
   const pendingCount = homeworks.filter(hw => !hw.isDone).length;
 
   return {
     homeworks,
+    schedule,
     loading,
     error,
     toggleStatus,
     addNewHomework,
+    updateExistingHomework,
+    removeHomework,
     reload: loadData,
     pendingCount,
   };

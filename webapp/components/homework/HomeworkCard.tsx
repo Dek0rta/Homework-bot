@@ -1,18 +1,19 @@
 'use client';
 
-import { useState }                                        from 'react';
-import { Check, Camera, ChevronRight }                     from 'lucide-react';
-import { HomeworkWithStatus }                              from '@/types';
-import { getSubjectStyle }                                 from '@/lib/subjects';
-import { formatDeadlineShort, daysLeftLabel, isOverdue }   from '@/lib/dateUtils';
-import HomeworkModal                                       from './HomeworkModal';
+import { useState }                                      from 'react';
+import { Check, Camera, ChevronRight }                   from 'lucide-react';
+import { HomeworkWithStatus }                            from '@/types';
+import { getSubjectStyle }                               from '@/lib/subjects';
+import { formatDeadlineShort, daysLeftLabel, isOverdue } from '@/lib/dateUtils';
+import HomeworkModal                                     from './HomeworkModal';
 
 interface HomeworkCardProps {
   homework: HomeworkWithStatus;
   onToggle: (id: string) => void;
+  onEdit:   (hw: HomeworkWithStatus) => void;
 }
 
-export default function HomeworkCard({ homework, onToggle }: HomeworkCardProps) {
+export default function HomeworkCard({ homework, onToggle, onEdit }: HomeworkCardProps) {
   const [showModal, setShowModal] = useState(false);
 
   const style   = getSubjectStyle(homework.subject);
@@ -20,7 +21,6 @@ export default function HomeworkCard({ homework, onToggle }: HomeworkCardProps) 
 
   return (
     <>
-      {/* ── Card ── */}
       <div
         className="relative mx-3 mb-2.5 rounded-2xl overflow-hidden border transition-opacity duration-200"
         style={{
@@ -49,17 +49,11 @@ export default function HomeworkCard({ homework, onToggle }: HomeworkCardProps) 
             }
             aria-label="Отметить выполненным"
           >
-            {homework.isDone && (
-              <Check size={12} color="#fff" strokeWidth={3} />
-            )}
+            {homework.isDone && <Check size={12} color="#fff" strokeWidth={3} />}
           </button>
 
-          {/* Main content — clickable → modal */}
-          <button
-            className="flex-1 min-w-0 text-left"
-            onClick={() => setShowModal(true)}
-          >
-            {/* Subject badge */}
+          {/* Main content */}
+          <button className="flex-1 min-w-0 text-left" onClick={() => setShowModal(true)}>
             <span
               className="inline-block text-[10px] font-bold uppercase tracking-widest px-2 py-[2px] rounded-full mb-1.5"
               style={{ color: style.color, backgroundColor: style.badge }}
@@ -67,20 +61,14 @@ export default function HomeworkCard({ homework, onToggle }: HomeworkCardProps) 
               {style.emoji}&nbsp;{homework.subject}
             </span>
 
-            {/* Description */}
             <p
               className="text-[14px] leading-snug line-clamp-2"
-              style={{
-                color:          'var(--tg-text)',
-                textDecoration: homework.isDone ? 'line-through' : 'none',
-              }}
+              style={{ color: 'var(--tg-text)', textDecoration: homework.isDone ? 'line-through' : 'none' }}
             >
               {homework.description}
             </p>
 
-            {/* Footer */}
             <div className="flex items-center gap-3 mt-2">
-              {/* Deadline chip */}
               <span
                 className="text-[11px] font-medium"
                 style={{ color: overdue ? '#ff3b30' : 'var(--tg-hint)' }}
@@ -88,29 +76,20 @@ export default function HomeworkCard({ homework, onToggle }: HomeworkCardProps) 
                 {overdue ? '⚠️ ' : '📅 '}
                 {formatDeadlineShort(homework.deadline)}
                 {!homework.isDone && (
-                  <span
-                    className="ml-1 text-[10px] opacity-75"
-                    style={{ color: overdue ? '#ff3b30' : 'var(--tg-hint)' }}
-                  >
+                  <span className="ml-1 text-[10px] opacity-75">
                     ({daysLeftLabel(homework.deadline)})
                   </span>
                 )}
               </span>
 
-              {/* Photo count */}
               {homework.photos.length > 0 && (
-                <span
-                  className="flex items-center gap-0.5 text-[11px]"
-                  style={{ color: 'var(--tg-hint)' }}
-                >
-                  <Camera size={11} />
-                  {homework.photos.length}
+                <span className="flex items-center gap-0.5 text-[11px]" style={{ color: 'var(--tg-hint)' }}>
+                  <Camera size={11} />{homework.photos.length}
                 </span>
               )}
             </div>
           </button>
 
-          {/* Chevron */}
           <button
             onClick={() => setShowModal(true)}
             className="flex-shrink-0 mt-1 opacity-30 active:opacity-60"
@@ -121,12 +100,12 @@ export default function HomeworkCard({ homework, onToggle }: HomeworkCardProps) 
         </div>
       </div>
 
-      {/* ── Detail modal ── */}
       {showModal && (
         <HomeworkModal
           homework={homework}
           onClose={() => setShowModal(false)}
           onToggle={() => { onToggle(homework.id); setShowModal(false); }}
+          onEdit={() => { setShowModal(false); onEdit(homework); }}
         />
       )}
     </>

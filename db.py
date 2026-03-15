@@ -53,10 +53,14 @@ def init_db():
         )
     """)
     # Миграции: добавляем колонки если таблицы уже существуют без них
-    try:
-        conn.execute("ALTER TABLE chat_homework ADD COLUMN due_date TEXT")
-    except Exception:
-        pass
+    for migration in [
+        "ALTER TABLE chat_homework ADD COLUMN due_date TEXT",
+        "ALTER TABLE chat_homework ADD COLUMN photos_json TEXT",
+    ]:
+        try:
+            conn.execute(migration)
+        except Exception:
+            pass
     conn.commit()
     conn.close()
 
@@ -167,6 +171,22 @@ def chat_homework_exists(chat_id: int, subject: str, task: str) -> bool:
     result = cur.fetchone()
     conn.close()
     return result is not None
+
+
+def update_chat_homework(
+    hw_id: int,
+    subject: str,
+    task: str,
+    due_date: str | None,
+    photos_json: str | None,
+) -> None:
+    conn = get_connection()
+    conn.execute(
+        "UPDATE chat_homework SET subject=?, task=?, due_date=?, photos_json=? WHERE id=?",
+        (subject, task, due_date, photos_json, hw_id),
+    )
+    conn.commit()
+    conn.close()
 
 
 def delete_chat_homework(hw_id: int):

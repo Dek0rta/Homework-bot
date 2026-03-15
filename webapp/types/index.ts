@@ -4,7 +4,7 @@ export interface Homework {
   description: string;
   /** ISO date "YYYY-MM-DD" */
   deadline: string;
-  /** Array of public photo URLs */
+  /** Array of photo URLs or base64 data-URIs */
   photos: string[];
   createdAt: string;
   /** Telegram user_id of the creator */
@@ -16,7 +16,7 @@ export interface HomeworkWithStatus extends Homework {
   isDone: boolean;
 }
 
-export type TabType = 'all' | 'debts' | 'add';
+export type TabType = 'schedule' | 'debts' | 'add';
 
 export interface TelegramUser {
   id: number;
@@ -33,4 +33,16 @@ export interface AddHomeworkData {
   /** ISO date "YYYY-MM-DD" */
   deadline: string;
   photos?: File[];
+  /** Existing photos to keep when editing (base64 / URLs) */
+  keepPhotos?: string[];
+}
+
+export interface ScheduleLesson {
+  /** 0 = Monday … 5 = Saturday */
+  dayOfWeek: number;
+  /** 1-based lesson number */
+  lessonNumber: number;
+  /** "HH:MM" */
+  startTime: string;
+  subject: string;
 }

@@ -1,32 +1,25 @@
 'use client';
 
-import { BookOpen, AlertCircle, PlusCircle } from 'lucide-react';
+import { CalendarDays, AlertCircle, PlusCircle } from 'lucide-react';
 import { TabType } from '@/types';
 
 interface BottomNavProps {
-  activeTab: TabType;
-  onTabChange: (tab: TabType) => void;
+  activeTab:    TabType;
+  onTabChange:  (tab: TabType) => void;
   pendingCount: number;
 }
 
 const TABS = [
-  { id: 'all'   as TabType, label: 'Задания',   Icon: BookOpen    },
-  { id: 'debts' as TabType, label: 'Долги',      Icon: AlertCircle },
-  { id: 'add'   as TabType, label: 'Добавить',   Icon: PlusCircle  },
+  { id: 'schedule' as TabType, label: 'Дневник',  Icon: CalendarDays },
+  { id: 'debts'    as TabType, label: 'Долги',    Icon: AlertCircle  },
+  { id: 'add'      as TabType, label: 'Добавить', Icon: PlusCircle   },
 ];
 
-export default function BottomNav({
-  activeTab,
-  onTabChange,
-  pendingCount,
-}: BottomNavProps) {
+export default function BottomNav({ activeTab, onTabChange, pendingCount }: BottomNavProps) {
   return (
     <nav
       className="flex-shrink-0 flex border-t pb-safe"
-      style={{
-        backgroundColor: 'var(--tg-secondary-bg)',
-        borderColor: 'rgba(142,142,147,0.2)',
-      }}
+      style={{ backgroundColor: 'var(--tg-secondary-bg)', borderColor: 'rgba(142,142,147,0.2)' }}
     >
       {TABS.map(({ id, label, Icon }) => {
         const active = activeTab === id;
@@ -36,7 +29,6 @@ export default function BottomNav({
             onClick={() => onTabChange(id)}
             className="flex-1 flex flex-col items-center justify-center gap-1 py-2.5 relative transition-opacity active:opacity-60"
           >
-            {/* Badge for pending count on "debts" tab */}
             {id === 'debts' && pendingCount > 0 && (
               <span
                 className="absolute top-1.5 right-[calc(50%-20px)] min-w-[16px] h-4 px-1
@@ -46,7 +38,6 @@ export default function BottomNav({
                 {pendingCount > 99 ? '99+' : pendingCount}
               </span>
             )}
-
             <Icon
               size={22}
               strokeWidth={active ? 2.4 : 1.6}

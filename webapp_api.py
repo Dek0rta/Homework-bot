@@ -3,11 +3,14 @@ REST API endpoints for the Telegram Mini App (WebApp).
 Mounted onto the existing aiohttp server inside bot.py's _start_keepalive().
 
 Endpoints:
-  GET  /api/homework              — all homework (aggregated across all chats)
-  POST /api/homework              — add homework (multipart/form-data)
-  GET  /api/status/{user_id}      — per-user completion map
-  POST /api/status                — set one homework's completion status
-  OPTIONS /api/*                  — CORS preflight
+  GET    /api/homework              — all homework (newest first)
+  POST   /api/homework              — add homework (JSON with base64 photos)
+  PUT    /api/homework/{id}         — edit homework
+  DELETE /api/homework/{id}         — delete homework
+  GET    /api/status/{user_id}      — per-user { hwId: isDone } map
+  POST   /api/status                — upsert one completion status
+  GET    /api/schedule              — class timetable (from schedule_owner)
+  OPTIONS /api/*                    — CORS preflight
 """
 from __future__ import annotations
 
@@ -25,7 +28,7 @@ import db
 
 CORS_HEADERS = {
     "Access-Control-Allow-Origin":  "*",
-    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+    "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type",
 }
 
@@ -45,92 +48,116 @@ def _json(data: Any, status: int = 200) -> web.Response:
 
 # ── Date helpers ──────────────────────────────────────────────────────────────
 
-def _normalize_deadline(due_date: str | None) -> str:
-    """Normalize any date string → YYYY-MM-DD required by the webapp."""
+def _norm_deadline(due_date: str | None) -> str:
+    """Normalize any date string → YYYY-MM-DD for the webapp."""
     if not due_date:
         return (date.today() + timedelta(days=1)).isoformat()
-    # Already YYYY-MM-DD
     if re.match(r"^\d{4}-\d{2}-\d{2}$", due_date):
         return due_date
-    # DD.MM.YYYY
     m = re.match(r"^(\d{1,2})\.(\d{2})\.(\d{4})$", due_date)
     if m:
         return f"{m.group(3)}-{m.group(2)}-{int(m.group(1)):02d}"
-    # DD.MM (assume current year)
     m = re.match(r"^(\d{1,2})\.(\d{2})$", due_date)
     if m:
-        y = date.today().year
-        return f"{y}-{m.group(2)}-{int(m.group(1)):02d}"
+        return f"{date.today().year}-{m.group(2)}-{int(m.group(1)):02d}"
     return (date.today() + timedelta(days=1)).isoformat()
 
 
-def _normalize_created_at(added_at: str | None) -> str:
-    """Convert bot's 'DD.MM HH:MM' format → ISO 8601. Falls back to now."""
+def _norm_created_at(added_at: str | None) -> str:
+    """Convert bot's 'DD.MM HH:MM' → ISO 8601."""
     if not added_at:
         return datetime.now().isoformat()
     m = re.match(r"^(\d{1,2})\.(\d{2})\s+(\d{2}):(\d{2})$", added_at)
     if m:
-        d_day, d_mon, hh, mm = m.groups()
-        y = date.today().year
         try:
-            return datetime(y, int(d_mon), int(d_day), int(hh), int(mm)).isoformat()
+            return datetime(
+                date.today().year, int(m.group(2)), int(m.group(1)),
+                int(m.group(3)), int(m.group(4)),
+            ).isoformat()
         except ValueError:
             pass
     return datetime.now().isoformat()
 
 
-# ── Route handlers ────────────────────────────────────────────────────────────
+def _row_to_hw(row: Any) -> dict:
+    photos: list[str] = []
+    try:
+        raw = row["photos_json"]
+        if raw:
+            photos = json.loads(raw)
+    except Exception:
+        pass
+    return {
+        "id":          str(row["id"]),
+        "subject":     row["subject"],
+        "description": row["task"],
+        "deadline":    _norm_deadline(row["due_date"]),
+        "photos":      photos,
+        "createdAt":   _norm_created_at(row["added_at"]),
+        "createdBy":   0,
+    }
 
-async def handle_get_homework(request: web.Request) -> web.Response:
-    """Return all homework from all chats, newest first."""
+
+# ── Lesson number lookup ──────────────────────────────────────────────────────
+
+_LESSON_TIMES = [
+    "8:15", "9:15", "10:10", "11:05", "12:00", "12:50", "13:40", "14:30",
+]
+
+
+def _lesson_number(start_time: str) -> int:
+    try:
+        return _LESSON_TIMES.index(start_time) + 1
+    except ValueError:
+        # Fallback: sort by time value
+        for i, t in enumerate(_LESSON_TIMES, 1):
+            if start_time <= t:
+                return i
+        return len(_LESSON_TIMES)
+
+
+# ── Handlers ──────────────────────────────────────────────────────────────────
+
+async def handle_get_homework(_request: web.Request) -> web.Response:
     try:
         conn = db.get_connection()
         rows = conn.execute(
-            "SELECT id, subject, task, added_at, due_date "
+            "SELECT id, subject, task, added_at, due_date, photos_json "
             "FROM chat_homework ORDER BY id DESC LIMIT 200"
         ).fetchall()
         conn.close()
-        result = [
-            {
-                "id":          str(row["id"]),
-                "subject":     row["subject"],
-                "description": row["task"],
-                "deadline":    _normalize_deadline(row["due_date"]),
-                "photos":      [],
-                "createdAt":   _normalize_created_at(row["added_at"]),
-                "createdBy":   0,
-            }
-            for row in rows
-        ]
-        return _json(result)
+        return _json([_row_to_hw(r) for r in rows])
     except Exception as exc:
         return _json({"error": str(exc)}, status=500)
 
 
 async def handle_post_homework(request: web.Request) -> web.Response:
-    """Add a new homework entry (multipart/form-data)."""
     try:
-        data        = await request.post()
+        data        = await request.json()
         subject     = str(data.get("subject",     "") or "").strip()
         description = str(data.get("description", "") or "").strip()
         deadline    = str(data.get("deadline",    "") or "").strip()
         user_id     = int(data.get("userId", 0) or 0)
+        photos      = data.get("photos", [])  # list[str] — base64 data-URIs
 
         if not subject or not description:
-            return _json({"error": "subject and description are required"}, status=400)
+            return _json({"error": "subject and description required"}, status=400)
 
-        # Associate with a specific group if WEBAPP_CHAT_ID is set,
-        # otherwise store under chat_id=0 (webapp-only homework).
-        chat_id = int(os.getenv("WEBAPP_CHAT_ID", 0) or 0)
-        hw_id   = db.save_chat_homework(chat_id, subject, description, deadline or None)
+        photos_json = json.dumps(photos) if photos else None
+        chat_id     = int(os.getenv("WEBAPP_CHAT_ID", 0) or 0)
+        hw_id       = db.save_chat_homework(chat_id, subject, description, deadline or None)
+
+        # Persist photos separately via update (save_chat_homework doesn't accept photos)
+        if photos_json:
+            db.update_chat_homework(hw_id, subject, description, deadline or None, photos_json)
 
         return _json(
             {
                 "id":          str(hw_id),
                 "subject":     subject,
                 "description": description,
-                "deadline":    _normalize_deadline(deadline),
-                "photos":      [],
+                "deadline":    _norm_deadline(deadline),
+                "photos":      photos,
                 "createdAt":   datetime.now().isoformat(),
                 "createdBy":   user_id,
             },
@@ -140,8 +167,44 @@ async def handle_post_homework(request: web.Request) -> web.Response:
         return _json({"error": str(exc)}, status=500)
 
 
+async def handle_put_homework(request: web.Request) -> web.Response:
+    try:
+        hw_id       = int(request.match_info["id"])
+        data        = await request.json()
+        subject     = str(data.get("subject",     "") or "").strip()
+        description = str(data.get("description", "") or "").strip()
+        deadline    = str(data.get("deadline",    "") or "").strip()
+        photos      = data.get("photos", [])
+
+        if not subject or not description:
+            return _json({"error": "subject and description required"}, status=400)
+
+        photos_json = json.dumps(photos) if photos else None
+        db.update_chat_homework(hw_id, subject, description, deadline or None, photos_json)
+
+        return _json({
+            "id":          str(hw_id),
+            "subject":     subject,
+            "description": description,
+            "deadline":    _norm_deadline(deadline),
+            "photos":      photos,
+            "createdAt":   datetime.now().isoformat(),
+            "createdBy":   0,
+        })
+    except Exception as exc:
+        return _json({"error": str(exc)}, status=500)
+
+
+async def handle_delete_homework(request: web.Request) -> web.Response:
+    try:
+        hw_id = int(request.match_info["id"])
+        db.delete_chat_homework(hw_id)
+        return _json({"ok": True})
+    except Exception as exc:
+        return _json({"error": str(exc)}, status=500)
+
+
 async def handle_get_status(request: web.Request) -> web.Response:
-    """Return { homeworkId: isDone } map for a given Telegram user."""
     try:
         user_id = int(request.match_info["user_id"])
         conn    = db.get_connection()
@@ -156,13 +219,11 @@ async def handle_get_status(request: web.Request) -> web.Response:
 
 
 async def handle_post_status(request: web.Request) -> web.Response:
-    """Persist one user's completion flag for one homework (upsert)."""
     try:
         data        = await request.json()
         user_id     = int(data["userId"])
         homework_id = int(data["homeworkId"])
         is_done     = bool(data["isDone"])
-
         conn = db.get_connection()
         conn.execute(
             "INSERT INTO user_homework_status (user_id, homework_id, is_done) VALUES (?,?,?)"
@@ -176,13 +237,43 @@ async def handle_post_status(request: web.Request) -> web.Response:
         return _json({"error": str(exc)}, status=500)
 
 
+async def handle_get_schedule(_request: web.Request) -> web.Response:
+    """Return class timetable from the schedule_owner of WEBAPP_CHAT_ID."""
+    try:
+        chat_id = int(os.getenv("WEBAPP_CHAT_ID", 0) or 0)
+        if not chat_id:
+            return _json([])
+
+        owner_id = db.get_chat_schedule_owner(chat_id)
+        if not owner_id:
+            return _json([])
+
+        entries = db.get_schedule(owner_id)
+        if not entries:
+            return _json([])
+
+        result = [
+            {
+                "dayOfWeek":    entry["day_of_week"],
+                "lessonNumber": _lesson_number(entry["start_time"]),
+                "startTime":    entry["start_time"],
+                "subject":      entry["subject"],
+            }
+            for entry in entries
+        ]
+        return _json(result)
+    except Exception as exc:
+        return _json([], status=200)  # graceful fallback
+
+
 # ── Route registration ────────────────────────────────────────────────────────
 
 def setup_webapp_routes(app: web.Application) -> None:
-    """Register all WebApp API routes on an existing aiohttp Application."""
-    app.router.add_get   ("/api/homework",         handle_get_homework)
-    app.router.add_post  ("/api/homework",         handle_post_homework)
-    app.router.add_get   ("/api/status/{user_id}", handle_get_status)
-    app.router.add_post  ("/api/status",           handle_post_status)
-    # CORS preflight for all /api/* paths
+    app.router.add_get   ("/api/homework",          handle_get_homework)
+    app.router.add_post  ("/api/homework",          handle_post_homework)
+    app.router.add_put   ("/api/homework/{id}",     handle_put_homework)
+    app.router.add_delete("/api/homework/{id}",     handle_delete_homework)
+    app.router.add_get   ("/api/status/{user_id}",  handle_get_status)
+    app.router.add_post  ("/api/status",            handle_post_status)
+    app.router.add_get   ("/api/schedule",          handle_get_schedule)
     app.router.add_route ("OPTIONS", "/api/{tail:.*}", _cors_preflight)
