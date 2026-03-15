@@ -235,7 +235,7 @@ function SectionLabel({
   Icon,
 }: {
   text: string;
-  Icon?: React.ComponentType<{ size: number }>;
+  Icon?: React.ComponentType<{ size?: number | string }>;
 }) {
   return (
     <div className="flex items-center gap-1.5 mb-2">
