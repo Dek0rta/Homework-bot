@@ -1426,15 +1426,18 @@ async def handle_group_photo(message: Message):
 # ──────────────────────────────────────────────
 
 async def _start_keepalive():
-    """Keep-alive HTTP-сервер для Replit (предотвращает засыпание)."""
+    """HTTP-сервер: health-check + WebApp REST API."""
     from aiohttp import web
+    import webapp_api
+
     port = int(os.getenv("PORT", 8080))
     app  = web.Application()
     app.router.add_get("/", lambda _r: web.Response(text="OK"))
+    webapp_api.setup_webapp_routes(app)
     runner = web.AppRunner(app)
     await runner.setup()
     await web.TCPSite(runner, "0.0.0.0", port).start()
-    logger.info("Keep-alive сервер запущен на порту %d", port)
+    logger.info("HTTP-сервер (health + WebApp API) запущен на порту %d", port)
 
 
 async def main():

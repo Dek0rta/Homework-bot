@@ -44,7 +44,15 @@ def init_db():
             schedule_owner_id INTEGER
         )
     """)
-    # Миграция: добавляем due_date если таблица уже существует без неё
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS user_homework_status (
+            user_id     INTEGER NOT NULL,
+            homework_id INTEGER NOT NULL,
+            is_done     INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (user_id, homework_id)
+        )
+    """)
+    # Миграции: добавляем колонки если таблицы уже существуют без них
     try:
         conn.execute("ALTER TABLE chat_homework ADD COLUMN due_date TEXT")
     except Exception:
