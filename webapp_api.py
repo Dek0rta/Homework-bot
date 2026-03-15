@@ -238,17 +238,32 @@ async def handle_post_status(request: web.Request) -> web.Response:
 
 
 async def handle_get_schedule(_request: web.Request) -> web.Response:
-    """Return class timetable from the schedule_owner of WEBAPP_CHAT_ID."""
+    """Return class timetable.
+
+    Strategy (first non-empty wins):
+      1. schedule of WEBAPP_CHAT_ID's schedule_owner
+      2. schedule of any user who has one (first by user_id — single-class bot)
+    """
     try:
+        entries = None
+
+        # ── attempt 1: via WEBAPP_CHAT_ID ──────────────────────────────────
         chat_id = int(os.getenv("WEBAPP_CHAT_ID", 0) or 0)
-        if not chat_id:
-            return _json([])
+        if chat_id:
+            owner_id = db.get_chat_schedule_owner(chat_id)
+            if owner_id:
+                entries = db.get_schedule(owner_id) or None
 
-        owner_id = db.get_chat_schedule_owner(chat_id)
-        if not owner_id:
-            return _json([])
+        # ── attempt 2: first available schedule in DB ───────────────────────
+        if not entries:
+            conn = db.get_connection()
+            row = conn.execute(
+                "SELECT DISTINCT user_id FROM schedule ORDER BY user_id LIMIT 1"
+            ).fetchone()
+            conn.close()
+            if row:
+                entries = db.get_schedule(row["user_id"]) or None
 
-        entries = db.get_schedule(owner_id)
         if not entries:
             return _json([])
 
@@ -262,8 +277,8 @@ async def handle_get_schedule(_request: web.Request) -> web.Response:
             for entry in entries
         ]
         return _json(result)
-    except Exception as exc:
-        return _json([], status=200)  # graceful fallback
+    except Exception:
+        return _json([])  # frontend will fall back to mock
 
 
 # ── Route registration ────────────────────────────────────────────────────────
