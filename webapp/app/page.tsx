@@ -1,20 +1,29 @@
 'use client';
 
-import { useState, useEffect }           from 'react';
-import { useTelegram }                   from '@/hooks/useTelegram';
-import { useHomework }                   from '@/hooks/useHomework';
-import { TabType, HomeworkWithStatus }   from '@/types';
-import BottomNav                         from '@/components/layout/BottomNav';
-import HomeworkList                      from '@/components/homework/HomeworkList';
-import HomeworkModal                     from '@/components/homework/HomeworkModal';
-import AddHomeworkForm                   from '@/components/homework/AddHomeworkForm';
-import ScheduleView                      from '@/components/schedule/ScheduleView';
-import LoadView                         from '@/components/load/LoadView';
+import { useState, useEffect }                  from 'react';
+import { AnimatePresence, motion }              from 'framer-motion';
+import { useTelegram }                          from '@/hooks/useTelegram';
+import { useHomework }                          from '@/hooks/useHomework';
+import { TabType, HomeworkWithStatus }          from '@/types';
+import BottomNav                                from '@/components/layout/BottomNav';
+import HomeworkList                             from '@/components/homework/HomeworkList';
+import HomeworkModal                            from '@/components/homework/HomeworkModal';
+import AddHomeworkForm                          from '@/components/homework/AddHomeworkForm';
+import ScheduleView                             from '@/components/schedule/ScheduleView';
+import LoadView                                 from '@/components/load/LoadView';
+import Snackbar                                 from '@/components/ui/Snackbar';
+
+interface SnackbarState {
+  message:  string;
+  hwId:     string | null;
+}
 
 export default function HomePage() {
-  const [activeTab,     setActiveTab]     = useState<TabType>('schedule');
-  const [editingHW,     setEditingHW]     = useState<HomeworkWithStatus | null>(null);
-  const [previewHW,     setPreviewHW]     = useState<HomeworkWithStatus | null>(null);
+  const [activeTab,  setActiveTab]  = useState<TabType>('schedule');
+  const [editingHW,  setEditingHW]  = useState<HomeworkWithStatus | null>(null);
+  const [previewHW,  setPreviewHW]  = useState<HomeworkWithStatus | null>(null);
+  const [snackbar,   setSnackbar]   = useState<SnackbarState | null>(null);
+
   const { user, colorScheme, isReady, haptic } = useTelegram();
 
   const {
@@ -32,10 +41,13 @@ export default function HomePage() {
   const handleToggle    = (id: string)   => { haptic('medium'); toggleStatus(id); };
   const handleEdit      = (hw: HomeworkWithStatus) => { haptic('light'); setEditingHW(hw); };
 
-  // ── Loading splash ────────────────────────────────────────────────────────
+  // ── Loading splash ─────────────────────────────────────────────────────────
   if (!isReady) {
     return (
-      <div className="flex items-center justify-center min-h-screen" style={{ backgroundColor: 'var(--tg-bg)' }}>
+      <div
+        className="flex items-center justify-center min-h-screen"
+        style={{ backgroundColor: 'var(--tg-bg)' }}
+      >
         <div
           className="w-9 h-9 rounded-full border-[3px] animate-spin"
           style={{ borderColor: 'var(--tg-accent)', borderTopColor: 'transparent' }}
@@ -44,7 +56,7 @@ export default function HomePage() {
     );
   }
 
-  // ── Edit overlay ──────────────────────────────────────────────────────────
+  // ── Edit overlay ────────────────────────────────────────────────────────────
   if (editingHW) {
     return (
       <div className="flex flex-col h-screen overflow-hidden" style={{ backgroundColor: 'var(--tg-bg)' }}>
@@ -76,7 +88,7 @@ export default function HomePage() {
     );
   }
 
-  // ── Tab titles ────────────────────────────────────────────────────────────
+  // ── Tab titles ─────────────────────────────────────────────────────────────
   const TITLES: Record<TabType, string> = {
     schedule: 'Дневник',
     debts:    'Мои долги',
@@ -88,6 +100,7 @@ export default function HomePage() {
 
   return (
     <div className="flex flex-col h-screen overflow-hidden" style={{ backgroundColor: 'var(--tg-bg)' }}>
+
       {/* ── Header ── */}
       <header
         className="flex-shrink-0 px-4 pt-3 pb-3 border-b"
@@ -116,11 +129,16 @@ export default function HomePage() {
         </div>
       </header>
 
-      {/* ── Content (all tabs stay mounted; opacity crossfade) ── */}
+      {/* ── Content (all tabs stay mounted; framer-motion opacity) ── */}
       <main className="flex-1 overflow-hidden relative">
 
-        <div className="absolute inset-0 transition-opacity duration-250 ease-in-out"
-          style={{ opacity: activeTab === 'schedule' ? 1 : 0, pointerEvents: activeTab === 'schedule' ? 'auto' : 'none' }}>
+        {/* Schedule */}
+        <motion.div
+          className="absolute inset-0"
+          animate={{ opacity: activeTab === 'schedule' ? 1 : 0 }}
+          transition={{ duration: 0.2 }}
+          style={{ pointerEvents: activeTab === 'schedule' ? 'auto' : 'none' }}
+        >
           <ScheduleView
             homeworks={homeworks}
             schedule={schedule}
@@ -129,10 +147,15 @@ export default function HomePage() {
             onOpen={hw => setPreviewHW(hw)}
             onAddForSubject={() => setActiveTab('add')}
           />
-        </div>
+        </motion.div>
 
-        <div className="absolute inset-0 overflow-y-auto transition-opacity duration-250 ease-in-out"
-          style={{ opacity: activeTab === 'debts' ? 1 : 0, pointerEvents: activeTab === 'debts' ? 'auto' : 'none' }}>
+        {/* Debts */}
+        <motion.div
+          className="absolute inset-0 overflow-y-auto"
+          animate={{ opacity: activeTab === 'debts' ? 1 : 0 }}
+          transition={{ duration: 0.2 }}
+          style={{ pointerEvents: activeTab === 'debts' ? 'auto' : 'none' }}
+        >
           <HomeworkList
             homeworks={debtHomeworks}
             loading={loading}
@@ -141,27 +164,41 @@ export default function HomePage() {
             onEdit={handleEdit}
             emptyMessage="Все задания выполнены!"
           />
-        </div>
+        </motion.div>
 
-        <div className="absolute inset-0 transition-opacity duration-250 ease-in-out"
-          style={{ opacity: activeTab === 'load' ? 1 : 0, pointerEvents: activeTab === 'load' ? 'auto' : 'none' }}>
+        {/* Load */}
+        <motion.div
+          className="absolute inset-0"
+          animate={{ opacity: activeTab === 'load' ? 1 : 0 }}
+          transition={{ duration: 0.2 }}
+          style={{ pointerEvents: activeTab === 'load' ? 'auto' : 'none' }}
+        >
           <LoadView homeworks={homeworks} loading={loading} />
-        </div>
+        </motion.div>
 
-        <div className="absolute inset-0 overflow-y-auto transition-opacity duration-250 ease-in-out"
-          style={{ opacity: activeTab === 'add' ? 1 : 0, pointerEvents: activeTab === 'add' ? 'auto' : 'none' }}>
+        {/* Add homework */}
+        <motion.div
+          className="absolute inset-0 overflow-y-auto"
+          animate={{ opacity: activeTab === 'add' ? 1 : 0 }}
+          transition={{ duration: 0.2 }}
+          style={{ pointerEvents: activeTab === 'add' ? 'auto' : 'none' }}
+        >
           <AddHomeworkForm
             onSubmit={async data => {
-              await addNewHomework(data);
+              const newHw = await addNewHomework(data);
               haptic('success');
+              setSnackbar({
+                message: 'Задание добавлено в список класса!',
+                hwId:    newHw.id,
+              });
               setActiveTab('schedule');
             }}
           />
-        </div>
+        </motion.div>
 
       </main>
 
-      {/* ── Preview modal (from schedule tap) ── */}
+      {/* ── Preview modal (schedule tap) ── */}
       {previewHW && (
         <HomeworkModal
           homework={previewHW}
@@ -170,6 +207,36 @@ export default function HomePage() {
           onEdit={() => { setPreviewHW(null); handleEdit(previewHW); }}
         />
       )}
+
+      {/* ── Undo snackbar ── */}
+      <div
+        className="fixed left-0 right-0 z-50 flex justify-center px-4 pointer-events-none"
+        style={{ bottom: 'calc(60px + env(safe-area-inset-bottom, 0px) + 10px)' }}
+      >
+        <AnimatePresence>
+          {snackbar && (
+            <motion.div
+              className="pointer-events-auto"
+              initial={{ y: 48, opacity: 0, scale: 0.95 }}
+              animate={{ y: 0,  opacity: 1, scale: 1    }}
+              exit={{    y: 48, opacity: 0, scale: 0.95 }}
+              transition={{ type: 'spring', damping: 22, stiffness: 300 }}
+            >
+              <Snackbar
+                message={snackbar.message}
+                action={snackbar.hwId ? {
+                  label: 'Отменить',
+                  onClick: () => {
+                    removeHomework(snackbar.hwId!);
+                    haptic('warning');
+                  },
+                } : undefined}
+                onDismiss={() => setSnackbar(null)}
+              />
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </div>
 
       {/* ── Bottom nav ── */}
       <BottomNav

@@ -59,6 +59,16 @@ export function daysLeftLabel(dateStr: string): string {
   return `просрочено на ${Math.abs(days)} дн.`;
 }
 
+/** Returns the ISO date of the next school day (Mon–Sat, skips Sunday) */
+export function getNextSchoolDay(): string {
+  const d = new Date();
+  d.setDate(d.getDate() + 1); // start from tomorrow
+  while (d.getDay() === 0) {  // 0 = Sunday in JS
+    d.setDate(d.getDate() + 1);
+  }
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
 /** Today as "YYYY-MM-DD" */
 export function todayISO(): string {
   const now = new Date();
