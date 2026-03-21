@@ -54,12 +54,28 @@ export default function HomeworkCard({ homework, onToggle, onEdit }: HomeworkCar
 
           {/* Main content */}
           <button className="flex-1 min-w-0 text-left" onClick={() => setShowModal(true)}>
-            <span
-              className="inline-block text-[10px] font-bold uppercase tracking-widest px-2 py-[2px] rounded-full mb-1.5"
-              style={{ color: style.color, backgroundColor: style.badge }}
-            >
-              {style.emoji}&nbsp;{homework.subject}
-            </span>
+            <div className="flex items-center gap-1.5 mb-1.5 flex-wrap">
+              <span
+                className="inline-block text-[10px] font-bold uppercase tracking-widest px-2 py-[2px] rounded-full"
+                style={{ color: style.color, backgroundColor: style.badge }}
+              >
+                {style.emoji}&nbsp;{homework.subject}
+              </span>
+              {homework.aiConfidence !== undefined &&
+               homework.aiConfidence !== null &&
+               homework.aiConfidence < 0.8 && (
+                <span
+                  className="inline-block text-[9px] font-semibold px-1.5 py-[2px] rounded-full"
+                  style={{
+                    backgroundColor: 'rgba(245,158,11,0.15)',
+                    color:           '#f59e0b',
+                  }}
+                  title="Предмет определён автоматически — проверьте правильность"
+                >
+                  ⚠️ Проверьте предмет
+                </span>
+              )}
+            </div>
 
             <p
               className="text-[14px] leading-snug line-clamp-2"

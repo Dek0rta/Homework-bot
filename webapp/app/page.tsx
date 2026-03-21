@@ -1,9 +1,10 @@
 'use client';
 
-import { useState, useEffect }                  from 'react';
+import { useState, useEffect, useMemo }         from 'react';
 import { AnimatePresence, motion }              from 'framer-motion';
 import { useTelegram }                          from '@/hooks/useTelegram';
 import { useHomework }                          from '@/hooks/useHomework';
+import { useGrades }                            from '@/hooks/useGrades';
 import { TabType, HomeworkWithStatus }          from '@/types';
 import BottomNav                                from '@/components/layout/BottomNav';
 import HomeworkList                             from '@/components/homework/HomeworkList';
@@ -11,6 +12,7 @@ import HomeworkModal                            from '@/components/homework/Home
 import AddHomeworkForm                          from '@/components/homework/AddHomeworkForm';
 import ScheduleView                             from '@/components/schedule/ScheduleView';
 import LoadView                                 from '@/components/load/LoadView';
+import GradesView                              from '@/components/grades/GradesView';
 import Snackbar                                 from '@/components/ui/Snackbar';
 
 interface SnackbarState {
@@ -31,6 +33,18 @@ export default function HomePage() {
     toggleStatus, addNewHomework, updateExistingHomework, removeHomework,
     pendingCount,
   } = useHomework(user?.id ?? null);
+
+  const {
+    grades, targets, loading: gradesLoading,
+    addGrade, removeGrade, setTarget,
+  } = useGrades(user?.id ?? null);
+
+  // Subjects for GradesView: unique from schedule + any subjects already in grades
+  const gradeSubjects = useMemo(() => {
+    const fromSchedule = [...new Set(schedule.map(l => l.subject))];
+    const fromGrades   = [...new Set(grades.map(g => g.subject))];
+    return [...new Set([...fromSchedule, ...fromGrades])].sort((a, b) => a.localeCompare(b, 'ru'));
+  }, [schedule, grades]);
 
   // Sync Telegram dark mode
   useEffect(() => {
@@ -94,6 +108,7 @@ export default function HomePage() {
     debts:    'Мои долги',
     add:      'Новое задание',
     load:     'Нагрузка класса',
+    grades:   'Мои оценки',
   };
 
   const debtHomeworks = homeworks.filter(hw => !hw.isDone);
@@ -193,6 +208,24 @@ export default function HomePage() {
               });
               setActiveTab('schedule');
             }}
+          />
+        </motion.div>
+
+        {/* Grades */}
+        <motion.div
+          className="absolute inset-0"
+          animate={{ opacity: activeTab === 'grades' ? 1 : 0 }}
+          transition={{ duration: 0.2 }}
+          style={{ pointerEvents: activeTab === 'grades' ? 'auto' : 'none' }}
+        >
+          <GradesView
+            grades={grades}
+            targets={targets}
+            loading={gradesLoading}
+            subjects={gradeSubjects}
+            onAddGrade={(subject, value) => { haptic('medium'); addGrade(subject, value); }}
+            onDeleteGrade={id => { haptic('medium'); removeGrade(id); }}
+            onSetTarget={(subject, target) => { haptic('light'); setTarget(subject, target); }}
           />
         </motion.div>
 

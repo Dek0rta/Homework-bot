@@ -52,10 +52,30 @@ def init_db():
             PRIMARY KEY (user_id, homework_id)
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS grades (
+            id      INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            subject TEXT    NOT NULL,
+            value   INTEGER NOT NULL,
+            date    TEXT    NOT NULL,
+            note    TEXT
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS grade_targets (
+            user_id INTEGER NOT NULL,
+            subject TEXT    NOT NULL,
+            target  INTEGER NOT NULL,
+            PRIMARY KEY (user_id, subject)
+        )
+    """)
     # Миграции: добавляем колонки если таблицы уже существуют без них
     for migration in [
         "ALTER TABLE chat_homework ADD COLUMN due_date TEXT",
         "ALTER TABLE chat_homework ADD COLUMN photos_json TEXT",
+        "ALTER TABLE chat_homework ADD COLUMN estimated_time_minutes INTEGER",
+        "ALTER TABLE chat_homework ADD COLUMN ai_confidence REAL",
     ]:
         try:
             conn.execute(migration)
@@ -99,12 +119,19 @@ def has_schedule(user_id: int) -> bool:
 
 # ── Групповое ДЗ ────────────────────────────────────────────────────────────
 
-def save_chat_homework(chat_id: int, subject: str, task: str, due_date: str | None = None) -> int:
+def save_chat_homework(
+    chat_id: int,
+    subject: str,
+    task: str,
+    due_date: str | None = None,
+    ai_confidence: float | None = None,
+) -> int:
     """Сохраняет ДЗ и возвращает id новой записи."""
     conn = get_connection()
     cur = conn.execute(
-        "INSERT INTO chat_homework (chat_id, subject, task, added_at, due_date) VALUES (?, ?, ?, ?, ?)",
-        (chat_id, subject, task, datetime.now().strftime("%d.%m %H:%M"), due_date),
+        "INSERT INTO chat_homework (chat_id, subject, task, added_at, due_date, ai_confidence)"
+        " VALUES (?, ?, ?, ?, ?, ?)",
+        (chat_id, subject, task, datetime.now().strftime("%d.%m %H:%M"), due_date, ai_confidence),
     )
     hw_id = cur.lastrowid
     conn.commit()
@@ -321,3 +348,69 @@ def set_chat_subjects(chat_id: int, subjects: list[str]):
     )
     conn.commit()
     conn.close()
+
+
+# ── Grades (personal per-user) ───────────────────────────────────────────────
+
+def save_grade(
+    user_id: int,
+    subject: str,
+    value: int,
+    date: str,
+    note: str | None = None,
+) -> int:
+    """Сохраняет оценку и возвращает её id."""
+    conn = get_connection()
+    cur = conn.execute(
+        "INSERT INTO grades (user_id, subject, value, date, note) VALUES (?,?,?,?,?)",
+        (user_id, subject, value, date, note),
+    )
+    grade_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+    return grade_id
+
+
+def get_grades(user_id: int) -> list[dict]:
+    """Возвращает все оценки пользователя (новые сначала)."""
+    conn = get_connection()
+    cur = conn.execute(
+        "SELECT id, user_id, subject, value, date, note FROM grades"
+        " WHERE user_id = ? ORDER BY id DESC",
+        (user_id,),
+    )
+    rows = [dict(r) for r in cur.fetchall()]
+    conn.close()
+    return rows
+
+
+def delete_grade(grade_id: int) -> None:
+    """Удаляет оценку по id."""
+    conn = get_connection()
+    conn.execute("DELETE FROM grades WHERE id = ?", (grade_id,))
+    conn.commit()
+    conn.close()
+
+
+def set_grade_target(user_id: int, subject: str, target: int) -> None:
+    """Устанавливает целевой балл по предмету для пользователя."""
+    conn = get_connection()
+    conn.execute(
+        "INSERT INTO grade_targets (user_id, subject, target) VALUES (?,?,?)"
+        " ON CONFLICT(user_id, subject) DO UPDATE SET target=excluded.target",
+        (user_id, subject, target),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_grade_targets(user_id: int) -> dict[str, int]:
+    """Возвращает словарь {предмет: целевой_балл} для пользователя."""
+    conn = get_connection()
+    cur = conn.execute(
+        "SELECT subject, target FROM grade_targets WHERE user_id = ?",
+        (user_id,),
+    )
+    result = {r["subject"]: r["target"] for r in cur.fetchall()}
+    conn.close()
+    return result

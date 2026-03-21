@@ -9,6 +9,8 @@ export interface Homework {
   createdAt: string;
   /** Telegram user_id of the creator */
   createdBy: number;
+  /** AI subject-detection confidence 0–1; null if added manually */
+  aiConfidence?: number | null;
 }
 
 export interface HomeworkWithStatus extends Homework {
@@ -16,7 +18,17 @@ export interface HomeworkWithStatus extends Homework {
   isDone: boolean;
 }
 
-export type TabType = 'schedule' | 'debts' | 'add' | 'load';
+export type TabType = 'schedule' | 'debts' | 'add' | 'load' | 'grades';
+
+export interface Grade {
+  id: string;
+  userId: number;
+  subject: string;
+  value: 2 | 3 | 4 | 5;
+  /** ISO date "YYYY-MM-DD" */
+  date: string;
+  note?: string | null;
+}
 
 export interface TelegramUser {
   id: number;

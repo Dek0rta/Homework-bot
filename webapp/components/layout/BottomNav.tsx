@@ -1,6 +1,6 @@
 'use client';
 
-import { CalendarDays, AlertCircle, PlusCircle, BarChart2 } from 'lucide-react';
+import { CalendarDays, AlertCircle, PlusCircle, BarChart2, GraduationCap } from 'lucide-react';
 import { TabType } from '@/types';
 
 interface BottomNavProps {
@@ -10,10 +10,11 @@ interface BottomNavProps {
 }
 
 const TABS = [
-  { id: 'schedule' as TabType, label: 'Дневник',   Icon: CalendarDays },
-  { id: 'debts'    as TabType, label: 'Долги',     Icon: AlertCircle  },
-  { id: 'load'     as TabType, label: 'Нагрузка',  Icon: BarChart2    },
-  { id: 'add'      as TabType, label: 'Добавить',  Icon: PlusCircle   },
+  { id: 'schedule' as TabType, label: 'Дневник',  Icon: CalendarDays    },
+  { id: 'debts'    as TabType, label: 'Долги',    Icon: AlertCircle     },
+  { id: 'grades'   as TabType, label: 'Оценки',   Icon: GraduationCap   },
+  { id: 'load'     as TabType, label: 'Нагрузка', Icon: BarChart2       },
+  { id: 'add'      as TabType, label: 'Добавить', Icon: PlusCircle      },
 ];
 
 export default function BottomNav({ activeTab, onTabChange, pendingCount }: BottomNavProps) {

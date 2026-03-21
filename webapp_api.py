@@ -87,14 +87,20 @@ def _row_to_hw(row: Any) -> dict:
             photos = json.loads(raw)
     except Exception:
         pass
+    confidence = None
+    try:
+        confidence = row["ai_confidence"]
+    except Exception:
+        pass
     return {
-        "id":          str(row["id"]),
-        "subject":     row["subject"],
-        "description": row["task"],
-        "deadline":    _norm_deadline(row["due_date"]),
-        "photos":      photos,
-        "createdAt":   _norm_created_at(row["added_at"]),
-        "createdBy":   0,
+        "id":           str(row["id"]),
+        "subject":      row["subject"],
+        "description":  row["task"],
+        "deadline":     _norm_deadline(row["due_date"]),
+        "photos":       photos,
+        "createdAt":    _norm_created_at(row["added_at"]),
+        "createdBy":    0,
+        "aiConfidence": confidence,
     }
 
 
@@ -122,7 +128,7 @@ async def handle_get_homework(_request: web.Request) -> web.Response:
     try:
         conn = db.get_connection()
         rows = conn.execute(
-            "SELECT id, subject, task, added_at, due_date, photos_json "
+            "SELECT id, subject, task, added_at, due_date, photos_json, ai_confidence "
             "FROM chat_homework ORDER BY id DESC LIMIT 200"
         ).fetchall()
         conn.close()
@@ -281,14 +287,100 @@ async def handle_get_schedule(_request: web.Request) -> web.Response:
         return _json([])  # frontend will fall back to mock
 
 
+# ── Grades ────────────────────────────────────────────────────────────────────
+
+async def handle_get_grades(request: web.Request) -> web.Response:
+    try:
+        user_id = int(request.match_info["user_id"])
+        rows = db.get_grades(user_id)
+        return _json([{
+            "id":      str(r["id"]),
+            "userId":  r["user_id"],
+            "subject": r["subject"],
+            "value":   r["value"],
+            "date":    r["date"],
+            "note":    r.get("note"),
+        } for r in rows])
+    except Exception as exc:
+        return _json({"error": str(exc)}, status=500)
+
+
+async def handle_post_grade(request: web.Request) -> web.Response:
+    try:
+        data    = await request.json()
+        user_id = int(data["userId"])
+        subject = str(data.get("subject", "") or "").strip()
+        value   = int(data["value"])
+        note    = str(data.get("note") or "").strip() or None
+
+        if not subject:
+            return _json({"error": "subject required"}, status=400)
+        if value not in (2, 3, 4, 5):
+            return _json({"error": "value must be 2–5"}, status=400)
+
+        today    = date.today().isoformat()
+        grade_id = db.save_grade(user_id, subject, value, today, note)
+        return _json({
+            "id":      str(grade_id),
+            "userId":  user_id,
+            "subject": subject,
+            "value":   value,
+            "date":    today,
+            "note":    note,
+        }, status=201)
+    except Exception as exc:
+        return _json({"error": str(exc)}, status=500)
+
+
+async def handle_delete_grade(request: web.Request) -> web.Response:
+    try:
+        grade_id = int(request.match_info["id"])
+        db.delete_grade(grade_id)
+        return _json({"ok": True})
+    except Exception as exc:
+        return _json({"error": str(exc)}, status=500)
+
+
+async def handle_get_grade_targets(request: web.Request) -> web.Response:
+    try:
+        user_id = int(request.match_info["user_id"])
+        targets = db.get_grade_targets(user_id)
+        return _json(targets)
+    except Exception as exc:
+        return _json({"error": str(exc)}, status=500)
+
+
+async def handle_post_grade_target(request: web.Request) -> web.Response:
+    try:
+        data    = await request.json()
+        user_id = int(data["userId"])
+        subject = str(data.get("subject", "") or "").strip()
+        target  = int(data["target"])
+
+        if not subject:
+            return _json({"error": "subject required"}, status=400)
+        if target not in (3, 4, 5):
+            return _json({"error": "target must be 3, 4, or 5"}, status=400)
+
+        db.set_grade_target(user_id, subject, target)
+        return _json({"ok": True})
+    except Exception as exc:
+        return _json({"error": str(exc)}, status=500)
+
+
 # ── Route registration ────────────────────────────────────────────────────────
 
 def setup_webapp_routes(app: web.Application) -> None:
-    app.router.add_get   ("/api/homework",          handle_get_homework)
-    app.router.add_post  ("/api/homework",          handle_post_homework)
-    app.router.add_put   ("/api/homework/{id}",     handle_put_homework)
-    app.router.add_delete("/api/homework/{id}",     handle_delete_homework)
-    app.router.add_get   ("/api/status/{user_id}",  handle_get_status)
-    app.router.add_post  ("/api/status",            handle_post_status)
-    app.router.add_get   ("/api/schedule",          handle_get_schedule)
-    app.router.add_route ("OPTIONS", "/api/{tail:.*}", _cors_preflight)
+    app.router.add_get   ("/api/homework",                  handle_get_homework)
+    app.router.add_post  ("/api/homework",                  handle_post_homework)
+    app.router.add_put   ("/api/homework/{id}",             handle_put_homework)
+    app.router.add_delete("/api/homework/{id}",             handle_delete_homework)
+    app.router.add_get   ("/api/status/{user_id}",          handle_get_status)
+    app.router.add_post  ("/api/status",                    handle_post_status)
+    app.router.add_get   ("/api/schedule",                  handle_get_schedule)
+    app.router.add_get   ("/api/grades/{user_id}",          handle_get_grades)
+    app.router.add_post  ("/api/grades",                    handle_post_grade)
+    app.router.add_delete("/api/grades/{id}",               handle_delete_grade)
+    app.router.add_get   ("/api/grade-targets/{user_id}",   handle_get_grade_targets)
+    app.router.add_post  ("/api/grade-targets",             handle_post_grade_target)
+    app.router.add_route ("OPTIONS", "/api/{tail:.*}",      _cors_preflight)

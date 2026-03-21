@@ -4,7 +4,7 @@
  * Leave empty / "mock" for built-in demo data.
  */
 
-import { Homework, AddHomeworkData, ScheduleLesson } from '@/types';
+import { Homework, AddHomeworkData, ScheduleLesson, Grade } from '@/types';
 import { MOCK_HOMEWORK, MOCK_SCHEDULE }               from './mockData';
 import { compressToBase64 }                           from './imageUtils';
 
@@ -147,6 +147,107 @@ export async function setHomeworkStatus(
     method:  'POST',
     headers: { 'Content-Type': 'application/json' },
     body:    JSON.stringify({ userId, homeworkId, isDone }),
+  });
+}
+
+// ── Grades ────────────────────────────────────────────────────────────────────
+
+const _gradesKey  = (uid: number) => `grades_${uid}`;
+const _targetsKey = (uid: number) => `grade_targets_${uid}`;
+
+export async function fetchGrades(userId: number): Promise<Grade[]> {
+  if (USE_MOCK) {
+    await sleep(150);
+    try {
+      const raw = localStorage.getItem(_gradesKey(userId));
+      return raw ? JSON.parse(raw) : [];
+    } catch { return []; }
+  }
+  const res = await fetch(`${API_URL}/api/grades/${userId}`);
+  if (!res.ok) return [];
+  return res.json();
+}
+
+export async function addGrade(
+  userId: number,
+  subject: string,
+  value: 2 | 3 | 4 | 5,
+  note?: string,
+): Promise<Grade> {
+  if (USE_MOCK) {
+    await sleep(200);
+    const grade: Grade = {
+      id:      `grade-${Date.now()}`,
+      userId,
+      subject,
+      value,
+      date:    new Date().toISOString().split('T')[0],
+      note:    note || null,
+    };
+    try {
+      const raw      = localStorage.getItem(_gradesKey(userId));
+      const existing: Grade[] = raw ? JSON.parse(raw) : [];
+      existing.unshift(grade);
+      localStorage.setItem(_gradesKey(userId), JSON.stringify(existing));
+    } catch { /* ignore */ }
+    return grade;
+  }
+  const res = await fetch(`${API_URL}/api/grades`, {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body:    JSON.stringify({ userId, subject, value, note }),
+  });
+  if (!res.ok) throw new Error(`addGrade: ${res.status}`);
+  return res.json();
+}
+
+export async function deleteGrade(userId: number, gradeId: string): Promise<void> {
+  if (USE_MOCK) {
+    await sleep(100);
+    try {
+      const raw = localStorage.getItem(_gradesKey(userId));
+      if (raw) {
+        const grades: Grade[] = JSON.parse(raw);
+        localStorage.setItem(_gradesKey(userId), JSON.stringify(grades.filter(g => g.id !== gradeId)));
+      }
+    } catch { /* ignore */ }
+    return;
+  }
+  await fetch(`${API_URL}/api/grades/${gradeId}`, { method: 'DELETE' });
+}
+
+export async function fetchGradeTargets(userId: number): Promise<Record<string, number>> {
+  if (USE_MOCK) {
+    await sleep(100);
+    try {
+      const raw = localStorage.getItem(_targetsKey(userId));
+      return raw ? JSON.parse(raw) : {};
+    } catch { return {}; }
+  }
+  const res = await fetch(`${API_URL}/api/grade-targets/${userId}`);
+  if (!res.ok) return {};
+  return res.json();
+}
+
+export async function setGradeTarget(
+  userId: number,
+  subject: string,
+  target: number,
+): Promise<void> {
+  if (USE_MOCK) {
+    await sleep(100);
+    try {
+      const raw      = localStorage.getItem(_targetsKey(userId));
+      const existing: Record<string, number> = raw ? JSON.parse(raw) : {};
+      existing[subject] = target;
+      localStorage.setItem(_targetsKey(userId), JSON.stringify(existing));
+    } catch { /* ignore */ }
+    return;
+  }
+  await fetch(`${API_URL}/api/grade-targets`, {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body:    JSON.stringify({ userId, subject, target }),
   });
 }
 
