@@ -41,9 +41,9 @@ export default function HomePage() {
 
   // Subjects for GradesView: unique from schedule + any subjects already in grades
   const gradeSubjects = useMemo(() => {
-    const fromSchedule = [...new Set(schedule.map(l => l.subject))];
-    const fromGrades   = [...new Set(grades.map(g => g.subject))];
-    return [...new Set([...fromSchedule, ...fromGrades])].sort((a, b) => a.localeCompare(b, 'ru'));
+    const fromSchedule = Array.from(new Set(schedule.map(l => l.subject)));
+    const fromGrades   = Array.from(new Set(grades.map(g => g.subject)));
+    return Array.from(new Set([...fromSchedule, ...fromGrades])).sort((a, b) => a.localeCompare(b, 'ru'));
   }, [schedule, grades]);
 
   // Sync Telegram dark mode
