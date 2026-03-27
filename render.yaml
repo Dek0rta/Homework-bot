@@ -3,7 +3,7 @@ services:
   - type: worker
     name: homework-bot
     runtime: python
-    buildCommand: pip install --no-cache-dir -r requirements.txt
+    buildCommand: pip uninstall -y mistralai && pip install --no-cache-dir -r requirements.txt
     startCommand: python bot.py
     plan: starter          # $7/month, не засыпает, нужен для бота
     envVars:
