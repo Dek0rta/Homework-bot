@@ -1,10 +1,21 @@
+# Telegram-бот
 aiogram>=3.13.0
-Pillow>=10.0.0
-mistralai==1.12.4
+aiofiles>=23.2.1
+
+# HTTP-сервер: health-check + REST API для WebApp
+aiohttp>=3.9.0
+
+# LLM: разбор ДЗ из текста и фото (Mistral + Pixtral)
+mistralai>=1.9,<2.0
+
+# Google Calendar
 google-api-python-client>=2.134.0
 google-auth-httplib2>=0.2.0
 google-auth-oauthlib>=1.2.1
-python-dotenv>=1.0.1
-aiofiles>=23.2.1
+
+# Графики нагрузки
 matplotlib>=3.8.0
 numpy>=1.26.0
+
+# Конфигурация
+python-dotenv>=1.0.1

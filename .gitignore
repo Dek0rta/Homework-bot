@@ -1,9 +1,21 @@
+# Секреты и данные
 .env
 data/
+
+# Python
 __pycache__/
 *.pyc
 *.pyo
-=1.0.0
-.replit
-start.bat
+.pytest_cache/
+.venv/
+venv/
+
+# Node / Next.js
+node_modules/
+.next/
+tsconfig.tsbuildinfo
+
+# Редакторы и ОС
 .claude/
+.replit
+.DS_Store
