@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useCallback } from 'react';
 import { TelegramUser } from '@/types';
+import { setInitData } from '@/lib/api';
 
 // ── Telegram WebApp type stubs ────────────────────────────────────────────────
 interface TelegramWebApp {
@@ -12,6 +13,9 @@ interface TelegramWebApp {
   platform: string;
   colorScheme: 'light' | 'dark';
   isExpanded: boolean;
+  /** Signed payload — the backend verifies this before trusting any user id. */
+  initData: string;
+  /** Parsed but unverified — safe for UI only, never for authorization. */
   initDataUnsafe: { user?: TelegramUser };
   themeParams: {
     bg_color?: string;
@@ -65,6 +69,8 @@ export function useTelegram() {
     if (tg) {
       tg.ready();
       tg.expand();
+      // Hand the signed payload to the API layer before any request goes out.
+      setInitData(tg.initData ?? '');
       setUser(tg.initDataUnsafe.user ?? DEV_USER);
       setColorScheme(tg.colorScheme ?? 'light');
     } else {
