@@ -18,6 +18,7 @@ Academic Load Analytics — модуль анализа учебной нагр�
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
 import logging
 import re
@@ -30,8 +31,8 @@ import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 import numpy as np
 
-from src.core.db import get_connection
-from src.services import llm
+from src.core.db import get_cached_estimate, get_connection, save_cached_estimate
+from src.services import llm, prefilter
 
 logger = logging.getLogger(__name__)
 
@@ -97,27 +98,49 @@ def migrate_analytics_schema() -> None:
 # 2. Оценка сложности задания через LLM
 # ══════════════════════════════════════════════════════════════════════════════
 
+MIN_ESTIMATE_MINUTES = 5
+MAX_ESTIMATE_MINUTES = 240
+
+
+def _estimate_cache_key(subject: str, task: str) -> str:
+    """Хеш нормализованного задания — ключ кеша оценок."""
+    normalized = prefilter.normalize_task(subject, task)
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
 async def estimate_hw_time(subject: str, task: str) -> Optional[int]:
     """
-    Запрашивает Mistral оценить время выполнения задания в минутах.
-    Возвращает int (5–240) или None при ошибке / невозможности оценить.
+    Оценка времени выполнения задания в минутах (5–240) или None при ошибке.
 
-    Приватность: в LLM передаётся только текст задания и предмет,
+    Результат кешируется по нормализованному тексту: одинаковые задания
+    в разных классах не оплачиваются повторно.
+
+    Приватность: в LLM передаётся только предмет и текст задания,
     без каких-либо идентификаторов пользователя.
     """
+    cache_key = _estimate_cache_key(subject, task)
+
+    cached = get_cached_estimate(cache_key)
+    if cached is not None:
+        logger.debug("Оценка времени взята из кеша: %s мин", cached)
+        return cached
+
     prompt = (
         "Ты опытный учитель средней школы. Оцени примерное время выполнения "
         "домашнего задания для среднего ученика 10 класса.\n\n"
         f"Предмет: {subject}\n"
         f"Задание: {task}\n\n"
-        "Ответь ТОЛЬКО одним целым числом — количество минут (от 5 до 240). "
+        f"Ответь ТОЛЬКО одним целым числом — количество минут "
+        f"(от {MIN_ESTIMATE_MINUTES} до {MAX_ESTIMATE_MINUTES}). "
         "Никаких пояснений, только число."
     )
     try:
         raw = await llm.ask_text(prompt)
         m = re.search(r"\d+", raw.strip())
         if m:
-            return max(5, min(240, int(m.group())))
+            minutes = max(MIN_ESTIMATE_MINUTES, min(MAX_ESTIMATE_MINUTES, int(m.group())))
+            save_cached_estimate(cache_key, minutes)
+            return minutes
     except Exception:
         logger.warning("LLM: не удалось оценить время ДЗ «%s» — «%s»", subject, task[:50])
     return None

@@ -1,7 +1,8 @@
 from __future__ import annotations
 import sqlite3
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
+
 from src.core.config import DB_PATH
 
 
@@ -82,6 +83,42 @@ def init_db():
             updated_at  TEXT    NOT NULL
         )
     """)
+    # Членство в чатах. Пишется при первом же сообщении пользователя в группе,
+    # поэтому класс известен ещё до того, как ученик что-то отметил.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS chat_members (
+            chat_id   INTEGER NOT NULL,
+            user_id   INTEGER NOT NULL,
+            seen_at   TEXT    NOT NULL,
+            PRIMARY KEY (chat_id, user_id)
+        )
+    """)
+    # ДЗ, ожидающие выбора дня сдачи. Раньше лежали в словаре в памяти —
+    # рестарт бота терял их, и кнопка отвечала «задание уже обработано».
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS pending_homework (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id    INTEGER NOT NULL,
+            subject    TEXT    NOT NULL,
+            task       TEXT    NOT NULL,
+            created_at TEXT    NOT NULL
+        )
+    """)
+    # Кеш LLM-оценок времени выполнения. Ключ — нормализованный текст задания,
+    # поэтому одинаковые ДЗ не оплачиваются повторно.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS hw_time_estimates (
+            task_hash  TEXT    PRIMARY KEY,
+            minutes    INTEGER NOT NULL,
+            created_at TEXT    NOT NULL
+        )
+    """)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_chat_homework_chat ON chat_homework(chat_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_schedule_user ON schedule(user_id)"
+    )
     # Миграции: добавляем колонки если таблицы уже существуют без них
     for migration in [
         "ALTER TABLE chat_homework ADD COLUMN due_date TEXT",
@@ -248,23 +285,112 @@ def get_schedule_for_chat(chat_id: int) -> list[dict]:
     return get_schedule(owner_id) if owner_id else []
 
 
+def remember_chat_member(chat_id: int, user_id: int) -> None:
+    """
+    Отмечает, что пользователь писал в этот чат. Вызывается на каждом
+    сообщении в группе, поэтому класс известен сразу, а не после первой
+    отметки о выполнении ДЗ.
+    """
+    conn = get_connection()
+    conn.execute(
+        "INSERT INTO chat_members (chat_id, user_id, seen_at) VALUES (?,?,?)"
+        " ON CONFLICT(chat_id, user_id) DO UPDATE SET seen_at=excluded.seen_at",
+        (chat_id, user_id, datetime.now().isoformat()),
+    )
+    conn.commit()
+    conn.close()
+
+
 def get_chats_for_user(user_id: int) -> list[int]:
     """
-    Чаты, в которых пользователь состоит по данным бота: где он владелец
-    расписания либо где он отмечал выполнение ДЗ.
-    Нужен, чтобы понять, к какому классу относится пользователь WebApp.
+    Чаты, к которым относится пользователь. Источники, в порядке надёжности:
+      1. он писал в чат (chat_members)
+      2. он владелец расписания чата
+      3. он отмечал в чате выполнение ДЗ
+
+    Нужен, чтобы понять, какому классу отдавать расписание, ДЗ и графики.
     """
     conn = get_connection()
     rows = conn.execute(
+        "SELECT chat_id FROM chat_members WHERE user_id = ?"
+        " UNION "
         "SELECT chat_id FROM chat_config WHERE schedule_owner_id = ?"
         " UNION "
         "SELECT DISTINCT h.chat_id FROM chat_homework h"
         " JOIN user_homework_status s ON s.homework_id = h.id"
         " WHERE s.user_id = ?",
-        (user_id, user_id),
+        (user_id, user_id, user_id),
     ).fetchall()
     conn.close()
     return [r[0] for r in rows]
+
+
+# ── ДЗ, ожидающие подтверждения дня ──────────────────────────────────────────
+
+def save_pending_homework(chat_id: int, subject: str, task: str) -> int:
+    """Кладёт ДЗ в очередь ожидания и возвращает её id для callback_data."""
+    conn = get_connection()
+    cur = conn.execute(
+        "INSERT INTO pending_homework (chat_id, subject, task, created_at) VALUES (?,?,?,?)",
+        (chat_id, subject, task, datetime.now().isoformat()),
+    )
+    pending_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+    return pending_id
+
+
+def take_pending_homework(pending_id: int) -> dict | None:
+    """
+    Достаёт и удаляет запись очереди. None — если её уже обработали
+    (например, двойным нажатием кнопки).
+    """
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT chat_id, subject, task FROM pending_homework WHERE id = ?",
+            (pending_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        conn.execute("DELETE FROM pending_homework WHERE id = ?", (pending_id,))
+        conn.commit()
+        return dict(row)
+    finally:
+        conn.close()
+
+
+def purge_stale_pending(older_than_days: int = 7) -> int:
+    """Убирает записи, на которые никто так и не нажал. Возвращает их число."""
+    cutoff = (datetime.now() - timedelta(days=older_than_days)).isoformat()
+    conn = get_connection()
+    cur = conn.execute("DELETE FROM pending_homework WHERE created_at < ?", (cutoff,))
+    conn.commit()
+    conn.close()
+    return cur.rowcount
+
+
+# ── Кеш оценок времени ────────────────────────────────────────────────────────
+
+def get_cached_estimate(task_hash: str) -> int | None:
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT minutes FROM hw_time_estimates WHERE task_hash = ?",
+        (task_hash,),
+    ).fetchone()
+    conn.close()
+    return row["minutes"] if row else None
+
+
+def save_cached_estimate(task_hash: str, minutes: int) -> None:
+    conn = get_connection()
+    conn.execute(
+        "INSERT INTO hw_time_estimates (task_hash, minutes, created_at) VALUES (?,?,?)"
+        " ON CONFLICT(task_hash) DO UPDATE SET minutes=excluded.minutes",
+        (task_hash, minutes, datetime.now().isoformat()),
+    )
+    conn.commit()
+    conn.close()
 
 
 def get_chat_schedule_owner(chat_id: int) -> int | None:

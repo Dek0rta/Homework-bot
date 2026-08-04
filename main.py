@@ -78,6 +78,11 @@ async def main() -> None:
     # До этого он использовался для всех пользователей сразу.
     calendar_api.migrate_legacy_token(ADMIN_USER_ID)
 
+    # ДЗ, на которые за неделю никто не выбрал день сдачи
+    stale = db.purge_stale_pending()
+    if stale:
+        logger.info("Удалено просроченных ожидающих ДЗ: %d", stale)
+
     bot = Bot(token=BOT_TOKEN)
     dp  = Dispatcher(storage=JsonStorage(FSM_PATH))
 

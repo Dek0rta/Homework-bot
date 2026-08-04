@@ -212,3 +212,98 @@ def test_delete_calendar_token(db):
 
 def test_calendar_id_defaults_for_unknown_user(db):
     assert db.get_calendar_id(999) == "primary"
+
+
+# ── Членство в чате ──────────────────────────────────────────────────────────
+
+def test_remember_chat_member_makes_class_known(db):
+    """
+    Регрессия: ученик, который ничего не отмечал и не владеет расписанием,
+    раньше был боту неизвестен и не получал ни расписания, ни графика.
+    """
+    assert db.get_chats_for_user(7) == []
+    db.remember_chat_member(-100, 7)
+    assert db.get_chats_for_user(7) == [-100]
+
+
+def test_remember_chat_member_is_idempotent(db):
+    db.remember_chat_member(-100, 7)
+    db.remember_chat_member(-100, 7)
+    assert db.get_chats_for_user(7) == [-100]
+
+
+def test_member_of_two_chats(db):
+    db.remember_chat_member(-100, 7)
+    db.remember_chat_member(-200, 7)
+    assert sorted(db.get_chats_for_user(7)) == [-200, -100]
+
+
+def test_membership_does_not_leak_between_users(db):
+    db.remember_chat_member(-100, 7)
+    assert db.get_chats_for_user(8) == []
+
+
+# ── Очередь ожидающих ДЗ ─────────────────────────────────────────────────────
+
+def test_pending_homework_survives_and_is_taken_once(db):
+    """
+    Раньше очередь жила в словаре в памяти: рестарт бота терял задание,
+    и кнопка отвечала «уже обработано». Теперь она в БД.
+    """
+    pending_id = db.save_pending_homework(-100, "Физика", "§8 задачи 1-3")
+
+    taken = db.take_pending_homework(pending_id)
+    assert taken["subject"] == "Физика"
+    assert taken["task"] == "§8 задачи 1-3"
+    assert taken["chat_id"] == -100
+
+    # Повторное нажатие той же кнопки ничего не находит
+    assert db.take_pending_homework(pending_id) is None
+
+
+def test_take_unknown_pending_returns_none(db):
+    assert db.take_pending_homework(12345) is None
+
+
+def test_pending_entries_are_independent(db):
+    first  = db.save_pending_homework(-100, "Физика", "задача 1")
+    second = db.save_pending_homework(-100, "Химия",  "задача 2")
+
+    assert db.take_pending_homework(first)["subject"] == "Физика"
+    # Удаление первой не трогает вторую
+    assert db.take_pending_homework(second)["subject"] == "Химия"
+
+
+def test_purge_stale_pending_keeps_fresh(db):
+    fresh = db.save_pending_homework(-100, "Физика", "свежая")
+
+    conn = db.get_connection()
+    conn.execute(
+        "INSERT INTO pending_homework (chat_id, subject, task, created_at)"
+        " VALUES (?,?,?,?)",
+        (-100, "Химия", "старая", "2020-01-01T00:00:00"),
+    )
+    conn.commit()
+    conn.close()
+
+    assert db.purge_stale_pending(older_than_days=7) == 1
+    assert db.take_pending_homework(fresh) is not None
+
+
+# ── Кеш оценок времени ───────────────────────────────────────────────────────
+
+def test_estimate_cache_roundtrip(db):
+    assert db.get_cached_estimate("hash-1") is None
+    db.save_cached_estimate("hash-1", 45)
+    assert db.get_cached_estimate("hash-1") == 45
+
+
+def test_estimate_cache_upsert(db):
+    db.save_cached_estimate("hash-1", 45)
+    db.save_cached_estimate("hash-1", 60)
+    assert db.get_cached_estimate("hash-1") == 60
+
+
+def test_estimate_cache_keys_are_independent(db):
+    db.save_cached_estimate("hash-1", 45)
+    assert db.get_cached_estimate("hash-2") is None
