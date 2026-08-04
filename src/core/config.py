@@ -8,8 +8,10 @@ load_dotenv()  # на Replit ничего не делает — там секр�
 BOT_TOKEN       = os.getenv("BOT_TOKEN")
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
 ADMIN_USER_ID   = int(os.getenv("ADMIN_USER_ID", 0))
-CALENDAR_ID     = os.getenv("CALENDAR_ID", "primary")
 TIMEZONE        = os.getenv("TIMEZONE", "Europe/Moscow")
+
+# Календарь выбирается на пользователя и хранится в user_calendar_tokens.
+# TOKEN_PATH ниже остаётся только ради миграции старого общего токена.
 
 # Директория для хранения данных.
 # Приоритет: 1) env var DATA_DIR  2) автодетект /data (Railway Volume)  3) локальная ./data/

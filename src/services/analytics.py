@@ -2,8 +2,8 @@
 Academic Load Analytics — модуль анализа учебной нагрузки.
 
 Архитектура (Decoupled):
-  Модуль не импортирует ничего из bot.py и независим от Telegram-логики.
-  Он работает только с db.get_connection() и gemini._chat().
+  Модуль независим от Telegram-логики и не импортирует хендлеры.
+  Работает только с db.get_connection() и llm.ask_text().
   Данные можно экспортировать в CSV для научного анализа.
 
 Приватность (Privacy by Design):
@@ -14,6 +14,8 @@ Academic Load Analytics — модуль анализа учебной нагр�
   - При экспорте в CSV chat_id остаётся, но его невозможно связать
     с конкретными учениками без доступа к БД Telegram.
 """
+
+from __future__ import annotations
 
 import csv
 import io
@@ -28,8 +30,8 @@ import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 import numpy as np
 
-import gemini
-from db import get_connection
+from src.core.db import get_connection
+from src.services import llm
 
 logger = logging.getLogger(__name__)
 
@@ -112,7 +114,7 @@ async def estimate_hw_time(subject: str, task: str) -> Optional[int]:
         "Никаких пояснений, только число."
     )
     try:
-        raw = await gemini._chat([{"role": "user", "content": prompt}], gemini._TEXT_MODEL)
+        raw = await llm.ask_text(prompt)
         m = re.search(r"\d+", raw.strip())
         if m:
             return max(5, min(240, int(m.group())))
@@ -143,7 +145,7 @@ def calculate_stress_index(
       2.0–3.0   — высокая          (оранжевая зона)
       SI > 3.0  — критическая      (красная зона, риск выгорания)
 
-    Ссылка на методологию: README-ANALYTICS.md
+    Ссылка на методологию: docs/ANALYTICS.md
     """
     if task_count == 0 or avg_minutes == 0:
         return 0.0

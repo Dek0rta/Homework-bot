@@ -1,3 +1,9 @@
+"""
+Разбор домашних заданий через Mistral: текст (mistral-small) и фото (Pixtral).
+"""
+
+from __future__ import annotations
+
 import asyncio
 import base64
 import json
@@ -7,7 +13,7 @@ from datetime import datetime
 
 from mistralai import Mistral
 
-from config import MISTRAL_API_KEY
+from src.core.config import MISTRAL_API_KEY
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +116,11 @@ async def _chat(messages: list[dict], model: str, max_retries: int = 4) -> str:
                 await asyncio.sleep(wait)
             else:
                 raise
+
+
+async def ask_text(prompt: str) -> str:
+    """Публичный однократный текстовый запрос к LLM. Возвращает сырой ответ модели."""
+    return await _chat([{"role": "user", "content": prompt}], _TEXT_MODEL)
 
 
 async def parse_homework_text(text: str, schedule: list[dict]) -> dict:

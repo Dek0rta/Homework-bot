@@ -11,6 +11,26 @@ import { compressToBase64 }                           from './imageUtils';
 const API_URL  = process.env.NEXT_PUBLIC_API_URL;
 const USE_MOCK = !API_URL || API_URL === 'mock';
 
+/**
+ * Signed Telegram initData. The backend derives the user id from this
+ * signature, so every authenticated request must carry it.
+ * Set once by useTelegram() on mount.
+ */
+let initData = '';
+
+export function setInitData(value: string) {
+  initData = value;
+}
+
+/** Headers for an authenticated request. */
+function authHeaders(extra: Record<string, string> = {}): Record<string, string> {
+  return { 'X-Telegram-Init-Data': initData, ...extra };
+}
+
+function jsonHeaders(): Record<string, string> {
+  return authHeaders({ 'Content-Type': 'application/json' });
+}
+
 function sleep(ms: number) {
   return new Promise(r => setTimeout(r, ms));
 }
@@ -23,7 +43,7 @@ async function compressPhotos(files: File[]): Promise<string[]> {
 
 export async function fetchHomework(): Promise<Homework[]> {
   if (USE_MOCK) { await sleep(400); return [...MOCK_HOMEWORK]; }
-  const res = await fetch(`${API_URL}/api/homework`);
+  const res = await fetch(`${API_URL}/api/homework`, { headers: authHeaders() });
   if (!res.ok) throw new Error(`fetchHomework: ${res.status}`);
   return res.json();
 }
@@ -50,7 +70,7 @@ export async function addHomework(
   const photos = data.photos?.length ? await compressPhotos(data.photos) : [];
   const res = await fetch(`${API_URL}/api/homework`, {
     method:  'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: jsonHeaders(),
     body:    JSON.stringify({
       subject:     data.subject,
       description: data.description,
@@ -89,7 +109,7 @@ export async function updateHomework(
 
   const res = await fetch(`${API_URL}/api/homework/${id}`, {
     method:  'PUT',
-    headers: { 'Content-Type': 'application/json' },
+    headers: jsonHeaders(),
     body:    JSON.stringify({
       subject:     data.subject,
       description: data.description,
@@ -108,7 +128,7 @@ export async function deleteHomework(id: string): Promise<void> {
     if (idx !== -1) MOCK_HOMEWORK.splice(idx, 1);
     return;
   }
-  await fetch(`${API_URL}/api/homework/${id}`, { method: 'DELETE' });
+  await fetch(`${API_URL}/api/homework/${id}`, { method: 'DELETE', headers: authHeaders() });
 }
 
 // ── Per-user status ───────────────────────────────────────────────────────────
@@ -123,7 +143,7 @@ export async function fetchUserStatuses(
       return raw ? JSON.parse(raw) : {};
     } catch { return {}; }
   }
-  const res = await fetch(`${API_URL}/api/status/${userId}`);
+  const res = await fetch(`${API_URL}/api/status`, { headers: authHeaders() });
   if (!res.ok) return {};
   return res.json();
 }
@@ -145,7 +165,7 @@ export async function setHomeworkStatus(
   }
   await fetch(`${API_URL}/api/status`, {
     method:  'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: jsonHeaders(),
     body:    JSON.stringify({ userId, homeworkId, isDone }),
   });
 }
@@ -163,7 +183,7 @@ export async function fetchGrades(userId: number): Promise<Grade[]> {
       return raw ? JSON.parse(raw) : [];
     } catch { return []; }
   }
-  const res = await fetch(`${API_URL}/api/grades/${userId}`);
+  const res = await fetch(`${API_URL}/api/grades`, { headers: authHeaders() });
   if (!res.ok) return [];
   return res.json();
 }
@@ -194,7 +214,7 @@ export async function addGrade(
   }
   const res = await fetch(`${API_URL}/api/grades`, {
     method:  'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: jsonHeaders(),
     body:    JSON.stringify({ userId, subject, value, note }),
   });
   if (!res.ok) throw new Error(`addGrade: ${res.status}`);
@@ -213,7 +233,7 @@ export async function deleteGrade(userId: number, gradeId: string): Promise<void
     } catch { /* ignore */ }
     return;
   }
-  await fetch(`${API_URL}/api/grades/${gradeId}`, { method: 'DELETE' });
+  await fetch(`${API_URL}/api/grades/${gradeId}`, { method: 'DELETE', headers: authHeaders() });
 }
 
 export async function fetchGradeTargets(userId: number): Promise<Record<string, number>> {
@@ -224,7 +244,7 @@ export async function fetchGradeTargets(userId: number): Promise<Record<string, 
       return raw ? JSON.parse(raw) : {};
     } catch { return {}; }
   }
-  const res = await fetch(`${API_URL}/api/grade-targets/${userId}`);
+  const res = await fetch(`${API_URL}/api/grade-targets`, { headers: authHeaders() });
   if (!res.ok) return {};
   return res.json();
 }
@@ -246,7 +266,7 @@ export async function setGradeTarget(
   }
   await fetch(`${API_URL}/api/grade-targets`, {
     method:  'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: jsonHeaders(),
     body:    JSON.stringify({ userId, subject, target }),
   });
 }
@@ -259,7 +279,7 @@ export async function fetchSchedule(): Promise<ScheduleLesson[]> {
     return [...MOCK_SCHEDULE];
   }
   try {
-    const res = await fetch(`${API_URL}/api/schedule`);
+    const res = await fetch(`${API_URL}/api/schedule`, { headers: authHeaders() });
     if (!res.ok) return [];
     const data: ScheduleLesson[] = await res.json();
     // Fall back to mock if server returned empty array
