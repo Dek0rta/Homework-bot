@@ -3,8 +3,8 @@ services:
   - type: worker
     name: homework-bot
     runtime: python
-    buildCommand: pip install --no-cache-dir --force-reinstall -r requirements.txt
-    startCommand: python bot.py
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
     plan: starter          # $7/month, не засыпает, нужен для бота
     envVars:
       - key: BOT_TOKEN
