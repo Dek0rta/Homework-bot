@@ -9,7 +9,7 @@ import asyncio
 import logging
 import os
 import tempfile
-from datetime import datetime
+from datetime import date, datetime, timedelta
 
 from aiogram import F, Router
 from aiogram.filters import Command
@@ -27,7 +27,8 @@ from src.bot.keyboards import kb_hw_due_day
 from src.bot.utils import delete_after, fmt_due_date, is_chat_admin, safe_delete
 from src.core import db
 from src.core.constants import DAYS_RU, GROUP_TYPES
-from src.services import analytics, llm, prefilter
+from src.services import analytics, llm, prefilter, timetable
+from src.services.weeks import parity_suffix
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +51,101 @@ async def _analyze_hw_async(chat_id: int, hw_id: int, subject: str, task: str, d
         logger.exception("Background analytics error for hw_id=%d", hw_id)
 
 
+# ── Замены уроков ─────────────────────────────────────────────────────────────
+
+async def _try_handle_override(message: Message, text: str, subjects: list[str]) -> bool:
+    """
+    Пробует записать замену или отмену урока из сообщения.
+    True — сообщение обработано как замена, дальше его вести не нужно.
+    """
+    try:
+        result = await llm.detect_schedule_override(text, subjects)
+    except Exception:
+        logger.exception("Override detection error")
+        return False
+
+    if not result:
+        return False
+
+    try:
+        day = datetime.strptime(result["date"], "%Y-%m-%d").date()
+    except (KeyError, TypeError, ValueError):
+        return False
+
+    old_subject = (result.get("old_subject") or "").strip()
+    new_subject = (result.get("new_subject") or "").strip()
+    cancelled   = bool(result.get("cancelled"))
+
+    if not old_subject and not new_subject:
+        return False
+
+    # Номер урока: из сообщения либо из расписания по названию предмета
+    slot = result.get("slot")
+    if not slot and old_subject:
+        slot = next(
+            (
+                lesson["slot"]
+                for lesson in timetable.lessons_on(message.chat.id, day)
+                if lesson["subject"].strip().lower() == old_subject.lower()
+            ),
+            None,
+        )
+
+    if not slot:
+        return False  # непонятно, какой урок менять — не трогаем расписание
+
+    db.save_override(
+        message.chat.id,
+        day.isoformat(),
+        int(slot),
+        None if cancelled else (new_subject or None),
+        note=f"из сообщения: {text[:80]}",
+    )
+
+    try:
+        await message.react([ReactionTypeEmoji(emoji="✍️")])
+    except Exception:
+        pass
+
+    date_label = fmt_due_date(day.isoformat())
+    if cancelled:
+        body = f"❌ <b>{old_subject or f'{slot} урок'}</b> отменён"
+    else:
+        body = f"🔄 <b>{slot} урок:</b> {new_subject}"
+        if old_subject:
+            body += f" <i>(вместо {old_subject})</i>"
+
+    msg = await message.reply(
+        f"{body}\n📅 {date_label}\n\n"
+        "<i>Учёл в расписании. Отменить — /undo_change</i>",
+        parse_mode="HTML",
+    )
+    asyncio.create_task(delete_after(msg, delay=30))
+    return True
+
+
+@router.message(Command("undo_change"), F.chat.type.in_(GROUP_TYPES))
+async def cmd_undo_change(message: Message):
+    """Убирает последнюю замену — если бот понял сообщение неправильно."""
+    conn = db.get_connection()
+    row = conn.execute(
+        "SELECT date, slot, subgroup FROM schedule_overrides"
+        " WHERE chat_id = ? ORDER BY created_at DESC LIMIT 1",
+        (message.chat.id,),
+    ).fetchone()
+    conn.close()
+
+    if not row:
+        await message.reply("Замен пока нет.")
+        return
+
+    db.delete_override(message.chat.id, row["date"], row["slot"], row["subgroup"])
+    await message.reply(
+        f"✅ Замена на {fmt_due_date(row['date'])} убрана — "
+        f"{row['slot']} урок вернулся к расписанию."
+    )
+
+
 # ── Детекция ДЗ в сообщениях ──────────────────────────────────────────────────
 
 async def _handle_group_message(message: Message, text: str | None = None, image_path: str | None = None):
@@ -65,6 +161,12 @@ async def _handle_group_message(message: Message, text: str | None = None, image
             # Предфильтр отсекает переписку до платного вызова модели
             if not prefilter.should_analyze(text):
                 return
+
+            # Замена урока обсуждается в том же чате — проверяем до ДЗ
+            if prefilter.has_override_markers(text):
+                if await _try_handle_override(message, text, subjects):
+                    return
+
             result = await llm.detect_group_homework(text, subjects)
     except Exception:
         logger.exception("Group homework detection error")
@@ -82,14 +184,11 @@ async def _handle_group_message(message: Message, text: str | None = None, image
     except Exception:
         pass
 
-    # Ищем уроки с этим предметом в расписании владельца чата
-    sched_entries: list[dict] = []
-    owner_id = db.get_chat_schedule_owner(message.chat.id)
-    if owner_id:
-        sched_entries = [
-            e for e in db.get_schedule(owner_id)
-            if e["subject"].strip().lower() == subject.strip().lower()
-        ]
+    # Ищем уроки с этим предметом в расписании класса
+    sched_entries = [
+        e for e in db.get_schedule_for_chat(message.chat.id)
+        if e["subject"].strip().lower() == subject.strip().lower()
+    ]
 
     # Очередь живёт в БД: рестарт бота между вопросом и нажатием кнопки
     # больше не теряет задание
@@ -335,10 +434,86 @@ async def cmd_hw(message: Message):
     asyncio.create_task(delete_after(notify))
 
 
+@router.message(Command("today"), F.chat.type.in_(GROUP_TYPES))
+async def cmd_today(message: Message):
+    """Что сегодня — с учётом чётности недели, подгруппы и замен."""
+    _track_member(message)
+
+    if not db.has_class_schedule(message.chat.id):
+        await message.reply("Расписание ещё не настроено — /setup")
+        return
+
+    subgroup = db.get_user_subgroup(message.chat.id, message.from_user.id) if message.from_user else 0
+    await message.reply(
+        timetable.format_day(message.chat.id, date.today(), subgroup),
+        parse_mode="HTML",
+    )
+
+
+@router.message(Command("tomorrow"), F.chat.type.in_(GROUP_TYPES))
+async def cmd_tomorrow(message: Message):
+    _track_member(message)
+
+    if not db.has_class_schedule(message.chat.id):
+        await message.reply("Расписание ещё не настроено — /setup")
+        return
+
+    subgroup = db.get_user_subgroup(message.chat.id, message.from_user.id) if message.from_user else 0
+    await message.reply(
+        timetable.format_day(message.chat.id, date.today() + timedelta(days=1), subgroup),
+        parse_mode="HTML",
+    )
+
+
+@router.message(Command("my_group"), F.chat.type.in_(GROUP_TYPES))
+async def cmd_my_group(message: Message):
+    """Выбор подгруппы — чтобы видеть только свои уроки."""
+    _track_member(message)
+
+    subgroups = db.get_schedule_subgroups(message.chat.id)
+    if not subgroups:
+        await message.reply("В расписании класса нет деления на подгруппы.")
+        return
+
+    current = db.get_user_subgroup(message.chat.id, message.from_user.id)
+    rows = [
+        [InlineKeyboardButton(
+            text=f"{'✅ ' if n == current else ''}{n} группа",
+            callback_data=f"grp:{n}",
+        )]
+        for n in subgroups
+    ]
+    rows.append([InlineKeyboardButton(
+        text=f"{'✅ ' if current == 0 else ''}Показывать все",
+        callback_data="grp:0",
+    )])
+
+    await message.reply(
+        "В какой ты подгруппе?\n"
+        "<i>Буду показывать расписание только с твоими уроками.</i>",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+    )
+
+
+@router.callback_query(F.data.startswith("grp:"))
+async def cb_set_subgroup(call: CallbackQuery):
+    subgroup = int(call.data.split(":")[1])
+    db.set_user_subgroup(call.message.chat.id, call.from_user.id, subgroup)
+    await call.answer("Запомнил" if subgroup else "Показываю все уроки")
+
+    label = f"{subgroup} группа" if subgroup else "все уроки"
+    await call.message.edit_text(
+        f"✅ {call.from_user.first_name}: {label}\n\n"
+        "<i>Расписание в /today и /tomorrow теперь под тебя.</i>",
+        parse_mode="HTML",
+    )
+
+
 @router.message(Command("schedule"), F.chat.type.in_(GROUP_TYPES))
 @router.channel_post(Command("schedule"))
 async def cmd_schedule_group(message: Message):
-    """Расписание класса. Общее для всех — настраивал кто-то один."""
+    """Расписание класса на неделю. Общее для всех — настраивал кто-то один."""
     _track_member(message)
     entries = db.get_class_schedule(message.chat.id)
 
@@ -356,12 +531,65 @@ async def cmd_schedule_group(message: Message):
     lines = ["📅 <b>Расписание класса</b>\n"]
     for day in sorted(by_day):
         lines.append(f"<b>{DAYS_RU[day]}</b>")
-        for e in sorted(by_day[day], key=lambda x: x["slot"]):
-            time = f" · {e['start_time']}" if e["start_time"] else ""
-            lines.append(f"  {e['slot']}. {e['subject']}{time}")
+        for e in sorted(by_day[day], key=lambda x: (x["slot"], x["subgroup"])):
+            line = f"  {e['slot']}. {e['subject']}"
+            if e["subgroup"]:
+                line += f" · {e['subgroup']} гр."
+            line += parity_suffix(e["week_parity"])
+            if e["start_time"]:
+                line += f"  <i>{e['start_time']}</i>"
+            lines.append(line)
         lines.append("")
 
-    await message.reply("\n".join(lines).rstrip(), parse_mode="HTML")
+    footer = []
+    if db.get_schedule_subgroups(message.chat.id):
+        footer.append("/my_group — выбрать свою подгруппу")
+    if db.schedule_has_parity(message.chat.id) and not db.get_parity_anchor(message.chat.id):
+        footer.append("⚠️ Не задана текущая неделя — /set_week")
+
+    text = "\n".join(lines).rstrip()
+    if footer:
+        text += "\n\n" + "\n".join(footer)
+
+    await message.reply(text, parse_mode="HTML")
+
+
+@router.message(Command("set_week"), F.chat.type.in_(GROUP_TYPES))
+async def cmd_set_week(message: Message):
+    """Какая неделя сейчас — от этого считается числитель/знаменатель."""
+    _track_member(message)
+
+    if not db.schedule_has_parity(message.chat.id):
+        await message.reply("В расписании класса нет деления на чётные и нечётные недели.")
+        return
+
+    await message.reply(
+        "Какая сейчас неделя?",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Числитель (нечётная)", callback_data="wk:odd")],
+            [InlineKeyboardButton(text="Знаменатель (чётная)", callback_data="wk:even")],
+        ]),
+    )
+
+
+@router.callback_query(F.data.startswith("wk:"))
+async def cb_set_week(call: CallbackQuery):
+    parity = call.data.split(":")[1]
+
+    # Опорная дата — понедельник нечётной недели. Если сейчас чётная,
+    # значит нечётной была прошлая.
+    this_monday = date.today() - timedelta(days=date.today().weekday())
+    anchor = this_monday if parity == "odd" else this_monday - timedelta(days=7)
+
+    db.set_parity_anchor(call.message.chat.id, anchor.isoformat())
+    await call.answer("Запомнил")
+
+    label = "числитель" if parity == "odd" else "знаменатель"
+    await call.message.edit_text(
+        f"✅ Текущая неделя — <b>{label}</b>.\n\n"
+        "<i>Дальше чередование считаю сам.</i>",
+        parse_mode="HTML",
+    )
 
 
 @router.message(Command("clear_hw"), F.chat.type.in_(GROUP_TYPES))

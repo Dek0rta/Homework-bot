@@ -44,14 +44,17 @@ PRIVATE_COMMANDS = [
 ]
 
 GROUP_COMMANDS = [
-    BotCommand(command="hw",             description="Список домашних заданий"),
-    BotCommand(command="schedule",       description="Расписание класса"),
-    BotCommand(command="stats",          description="График нагрузки класса"),
-    BotCommand(command="setup",          description="Настроить расписание по фото"),
-    BotCommand(command="export_csv",     description="Экспорт данных нагрузки в CSV"),
-    BotCommand(command="setup_subjects", description="Изменить предметы вручную (только admin)"),
-    BotCommand(command="clear_hw",       description="Очистить список ДЗ (только admin)"),
-    BotCommand(command="help",           description="Справка"),
+    BotCommand(command="today",       description="Что сегодня"),
+    BotCommand(command="tomorrow",    description="Что завтра"),
+    BotCommand(command="hw",          description="Список домашних заданий"),
+    BotCommand(command="schedule",    description="Расписание на неделю"),
+    BotCommand(command="my_group",    description="Выбрать свою подгруппу"),
+    BotCommand(command="set_week",    description="Указать текущую неделю"),
+    BotCommand(command="stats",       description="График нагрузки класса"),
+    BotCommand(command="setup",       description="Настроить расписание по фото"),
+    BotCommand(command="undo_change", description="Отменить последнюю замену"),
+    BotCommand(command="clear_hw",    description="Очистить список ДЗ (только admin)"),
+    BotCommand(command="help",        description="Справка"),
 ]
 
 

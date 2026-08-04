@@ -33,6 +33,13 @@ _HOMEWORK_WORDS = {
 # Слова, характерные для англоязычных учебников в сокращениях
 _SHORT_MARKERS = {"hw", "ex", "wb", "sb", "p", "pg"}
 
+# Признаки сообщения о замене или отмене урока
+_OVERRIDE_WORDS = {
+    "вместо", "замена", "заменят", "заменили", "замену",
+    "отменили", "отменяется", "отмена", "отменен", "отменён",
+    "перенесли", "перенос", "переносится", "не будет",
+}
+
 # Явные признаки болтовни. Работают только если нет ни одного маркера ДЗ.
 _CHITCHAT_PATTERNS = [
     r"^\s*(привет|здравствуйте|добрый день|доброе утро|добрый вечер|хай|ку)\b",
@@ -68,6 +75,14 @@ def has_homework_markers(text: str) -> bool:
     return bool(tokens & _HOMEWORK_WORDS) or bool(tokens & _SHORT_MARKERS)
 
 
+def has_override_markers(text: str) -> bool:
+    """Похоже ли сообщение на замену или отмену урока."""
+    lowered = text.lower()
+    if "не будет" in lowered:
+        return True
+    return bool(_tokens(text) & _OVERRIDE_WORDS)
+
+
 def is_probably_chitchat(text: str) -> bool:
     """Похоже ли сообщение на обычную переписку (при отсутствии маркеров ДЗ)."""
     return any(p.search(text) for p in _CHITCHAT_RE)
@@ -88,7 +103,7 @@ def should_analyze(text: str | None) -> bool:
     if len(stripped) < MIN_LENGTH:
         return False
 
-    if has_homework_markers(stripped):
+    if has_homework_markers(stripped) or has_override_markers(stripped):
         return True
 
     # Маркеров нет — короткая болтовня отсекается наверняка

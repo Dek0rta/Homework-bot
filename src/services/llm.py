@@ -129,12 +129,17 @@ _SCHEDULE_PROMPT = """\
 На изображении — школьное расписание уроков. Распознай его целиком.
 
 Верни СТРОГО JSON без markdown:
-{"lessons":[{"day":<0-6>,"slot":<1-8>,"subject":"..."}],"confidence":<0.0-1.0>}
+{"lessons":[{"day":<0-6>,"slot":<1-8>,"subject":"...","subgroup":<0-9>,"week_parity":"<''|odd|even>"}],"confidence":<0.0-1.0>}
 
-day:     0=Понедельник, 1=Вторник, 2=Среда, 3=Четверг, 4=Пятница, 5=Суббота
-slot:    порядковый номер урока в этот день, начиная с 1
-subject: название предмета как написано, но в читаемом виде
-         («матем.» → «Математика», «физ-ра» → «Физкультура»)
+day:      0=Понедельник, 1=Вторник, 2=Среда, 3=Четверг, 4=Пятница, 5=Суббота
+slot:     порядковый номер урока в этот день, начиная с 1
+subject:  название предмета как написано, но в читаемом виде
+          («матем.» → «Математика», «физ-ра» → «Физкультура»)
+subgroup: 0 — урок у всего класса (обычный случай)
+          1, 2 — если урок только для части класса
+week_parity: "" — урок каждую неделю (обычный случай)
+             "odd"  — числитель / нечётная / верхняя / первая неделя
+             "even" — знаменатель / чётная / нижняя / вторая неделя
 
 Правила:
 — Расписание может быть таблицей: дни в столбцах или в строках. Определи ориентацию сам.
@@ -142,17 +147,35 @@ subject: название предмета как написано, но в чи
 — Если номера уроков не подписаны, нумеруй сверху вниз в пределах дня.
 — Время уроков игнорируй, нужен только порядковый номер.
 — Классный час, факультатив и подобное — тоже уроки, включай их.
-— confidence: насколько уверенно прочитано изображение (0.0–1.0).
-— Если на изображении нет расписания уроков, верни {"lessons":[],"confidence":0.0}\
+
+ПОДГРУППЫ. Если в одной клетке два предмета для разных частей класса
+(«Англ. 1 гр. / Англ. 2 гр.», «Информатика (1) / Технология (2)»),
+верни ДВЕ записи с одинаковыми day и slot, но subgroup 1 и 2.
+Номер подгруппы убирай из названия предмета.
+Если подгруппа не указана — ставь subgroup: 0.
+
+ЧЁТНОСТЬ НЕДЕЛЬ. Если в клетке предмет через дробь или с пометкой
+числитель/знаменатель («Алгебра / Геометрия», «Химия (чис.)»),
+верни ДВЕ записи с одинаковыми day и slot: первую с week_parity "odd",
+вторую с "even". Пометку убирай из названия предмета.
+Если пометки нет — ставь week_parity: "".
+
+confidence: насколько уверенно прочитано изображение (0.0–1.0).
+Если на изображении нет расписания уроков, верни {"lessons":[],"confidence":0.0}\
 """
 
 
 def _normalize_schedule(data: dict) -> dict:
     """
     Приводит ответ модели к безопасному виду: отбрасывает мусорные записи,
-    убирает дубли одного слота и сортирует по дню и номеру урока.
+    убирает дубли и сортирует.
+
+    Уникальность — по (день, урок, подгруппа, чётность): один слот законно
+    содержит несколько записей, если это разные подгруппы или разные недели.
     """
-    seen: set[tuple[int, int]] = set()
+    from src.services.weeks import normalize_parity
+
+    seen: set[tuple[int, int, int, str]] = set()
     lessons = []
 
     for item in data.get("lessons") or []:
@@ -165,13 +188,30 @@ def _normalize_schedule(data: dict) -> dict:
 
         if not subject or not (0 <= day <= 6) or not (1 <= slot <= 8):
             continue
-        if (day, slot) in seen:
+
+        try:
+            subgroup = int(item.get("subgroup", 0) or 0)
+        except (TypeError, ValueError):
+            subgroup = 0
+        if not (0 <= subgroup <= 9):
+            subgroup = 0
+
+        parity = normalize_parity(item.get("week_parity"))
+
+        key = (day, slot, subgroup, parity)
+        if key in seen:
             continue
 
-        seen.add((day, slot))
-        lessons.append({"day": day, "slot": slot, "subject": subject})
+        seen.add(key)
+        lessons.append({
+            "day":         day,
+            "slot":        slot,
+            "subject":     subject,
+            "subgroup":    subgroup,
+            "week_parity": parity,
+        })
 
-    lessons.sort(key=lambda x: (x["day"], x["slot"]))
+    lessons.sort(key=lambda x: (x["day"], x["slot"], x["subgroup"], x["week_parity"]))
 
     try:
         confidence = float(data.get("confidence", 0))
@@ -206,6 +246,58 @@ async def parse_schedule_image(image_path: str) -> dict:
     except Exception:
         logger.warning("Не удалось разобрать расписание из ответа модели")
         return {"lessons": [], "confidence": 0.0}
+
+
+_OVERRIDE_HINT = """\
+Ответь СТРОГО одним из двух вариантов, без markdown:
+— Если это замена или отмена урока:
+  {"date":"<YYYY-MM-DD>","slot":<1-8 или null>,"old_subject":"<или null>","new_subject":"<или null>","cancelled":<true|false>,"confidence":<0.0-1.0>}
+— Если сообщение не про замену: null
+
+date:        конкретная дата. «завтра», «в понедельник» — переведи в дату.
+slot:        номер урока, если указан явно («вместо 3 урока»). Иначе null.
+old_subject: какой урок заменяют или отменяют. Иначе null.
+new_subject: чем заменяют. При отмене — null.
+cancelled:   true если урок отменён/его не будет, без замены другим.\
+"""
+
+_OVERRIDE_EXAMPLES = """\
+ПРИМЕРЫ — ЭТО ЗАМЕНА:
+✅ «Завтра вместо физики будет история»
+✅ «Химии не будет в пятницу»
+✅ «3 урок отменили»
+✅ «В понедельник физру заменят на математику»
+
+ПРИМЕРЫ — ЭТО НЕ ЗАМЕНА:
+❌ «ДЗ по физике параграф 8» — домашнее задание
+❌ «А что завтра по расписанию?» — вопрос
+❌ «Физика была сложная» — обсуждение
+❌ «Кто идёт на физру?» — вопрос\
+"""
+
+
+async def detect_schedule_override(text: str, subjects: list[str]) -> dict | None:
+    """
+    Ищет в сообщении замену или отмену урока. Возвращает dict или None.
+
+    Замены объявляют в том же чате, что и ДЗ, поэтому дешевле распознать их
+    на лету, чем заставлять кого-то редактировать расписание вручную.
+    """
+    prompt = (
+        "Ты определяешь, сообщает ли текст о замене или отмене урока.\n\n"
+        "Сегодня: " + _today_ctx() + "\n"
+        "Предметы класса: " + ", ".join(subjects) + "\n\n"
+        + _OVERRIDE_EXAMPLES + "\n\n"
+        "Сообщение:\n«" + text + "»\n\n"
+        + _OVERRIDE_HINT
+    )
+    raw = await _chat([{"role": "user", "content": prompt}], _TEXT_MODEL)
+    logger.debug("Override detect raw: %s", raw)
+
+    result = _parse_group_result(raw)
+    if not result or not result.get("date"):
+        return None
+    return result
 
 
 async def parse_schedule_text(text: str) -> dict:

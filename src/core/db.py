@@ -96,6 +96,11 @@ def init_db():
     # Расписание класса — общее для всех участников чата.
     # Один ученик настраивает, остальные пользуются без своего сетапа.
     # Личное расписание (таблица schedule) остаётся для тех, кто хочет своё.
+    #
+    # Один слот может содержать несколько записей:
+    #   • подгруппы — «Английский 1 группа» и «Английский 2 группа» одновременно
+    #   • чётность  — «Алгебра» по числителю, «Геометрия» по знаменателю
+    # Поэтому в ключе участвуют subgroup и week_parity.
     conn.execute("""
         CREATE TABLE IF NOT EXISTS class_schedule (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -103,7 +108,41 @@ def init_db():
             day_of_week INTEGER NOT NULL,
             slot        INTEGER NOT NULL,
             subject     TEXT    NOT NULL,
-            UNIQUE(chat_id, day_of_week, slot)
+            subgroup    INTEGER NOT NULL DEFAULT 0,  -- 0=весь класс, 1..n=подгруппа
+            week_parity TEXT    NOT NULL DEFAULT '', -- ''=каждую неделю, 'odd'|'even'
+            UNIQUE(chat_id, day_of_week, slot, subgroup, week_parity)
+        )
+    """)
+    # Замены на конкретную дату: отмена урока или подмена предмета.
+    # Живут отдельно от расписания, чтобы не портить постоянную сетку.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS schedule_overrides (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id    INTEGER NOT NULL,
+            date       TEXT    NOT NULL,          -- YYYY-MM-DD
+            slot       INTEGER NOT NULL,
+            subgroup   INTEGER NOT NULL DEFAULT 0,
+            subject    TEXT,                      -- NULL = урок отменён
+            note       TEXT,
+            created_at TEXT    NOT NULL,
+            UNIQUE(chat_id, date, slot, subgroup)
+        )
+    """)
+    # Подгруппа ученика: кто в какой группе по английскому и т.п.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS user_subgroups (
+            chat_id  INTEGER NOT NULL,
+            user_id  INTEGER NOT NULL,
+            subgroup INTEGER NOT NULL,
+            PRIMARY KEY (chat_id, user_id)
+        )
+    """)
+    # Опорная дата отсчёта чётности недель для класса.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS class_settings (
+            chat_id           INTEGER PRIMARY KEY,
+            parity_anchor     TEXT,     -- YYYY-MM-DD понедельника нечётной недели
+            updated_at        TEXT NOT NULL
         )
     """)
     # ДЗ, ожидающие выбора дня сдачи. Раньше лежали в словаре в памяти —
@@ -138,6 +177,11 @@ def init_db():
         "ALTER TABLE chat_homework ADD COLUMN photos_json TEXT",
         "ALTER TABLE chat_homework ADD COLUMN estimated_time_minutes INTEGER",
         "ALTER TABLE chat_homework ADD COLUMN ai_confidence REAL",
+        # Подгруппы и чётность недель добавлены позже создания class_schedule
+        "ALTER TABLE class_schedule ADD COLUMN subgroup INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE class_schedule ADD COLUMN week_parity TEXT NOT NULL DEFAULT ''",
+        # ДЗ может относиться только к одной подгруппе
+        "ALTER TABLE chat_homework ADD COLUMN subgroup INTEGER NOT NULL DEFAULT 0",
     ]:
         try:
             conn.execute(migration)
@@ -290,34 +334,57 @@ def set_chat_schedule_owner(chat_id: int, owner_id: int):
 def save_class_schedule(chat_id: int, lessons: list[dict]) -> int:
     """
     Сохраняет расписание класса целиком, заменяя прежнее.
-    lessons = [{"day": 0, "slot": 1, "subject": "Математика"}, ...]
+
+    lessons = [{"day", "slot", "subject", "subgroup"?, "week_parity"?}, ...]
+    subgroup    — 0 (весь класс) или номер подгруппы
+    week_parity — "" | "odd" | "even"
+
     Возвращает число сохранённых уроков.
     """
     conn = get_connection()
     conn.execute("DELETE FROM class_schedule WHERE chat_id = ?", (chat_id,))
     conn.executemany(
-        "INSERT OR REPLACE INTO class_schedule (chat_id, day_of_week, slot, subject)"
-        " VALUES (?,?,?,?)",
-        [(chat_id, l["day"], l["slot"], l["subject"]) for l in lessons],
+        "INSERT OR REPLACE INTO class_schedule"
+        " (chat_id, day_of_week, slot, subject, subgroup, week_parity)"
+        " VALUES (?,?,?,?,?,?)",
+        [
+            (
+                chat_id, l["day"], l["slot"], l["subject"],
+                int(l.get("subgroup", 0) or 0),
+                str(l.get("week_parity", "") or ""),
+            )
+            for l in lessons
+        ],
     )
     conn.commit()
     conn.close()
     return len(lessons)
 
 
-def get_class_schedule(chat_id: int) -> list[dict]:
+def get_class_schedule(chat_id: int, subgroup: int | None = None) -> list[dict]:
     """
-    Расписание класса в формате, совместимом с личным:
-    day_of_week, subject, start_time (время выводится из номера урока).
+    Расписание класса в формате, совместимом с личным.
+
+    subgroup:
+      None — всё расписание целиком, включая обе подгруппы
+      n    — только уроки всего класса (subgroup=0) и подгруппы n
     """
     from src.core.constants import LESSON_TIMES
 
+    query = (
+        "SELECT day_of_week, slot, subject, subgroup, week_parity FROM class_schedule"
+        " WHERE chat_id = ?"
+    )
+    params: list = [chat_id]
+
+    if subgroup is not None:
+        query += " AND subgroup IN (0, ?)"
+        params.append(subgroup)
+
+    query += " ORDER BY day_of_week, slot, subgroup"
+
     conn = get_connection()
-    rows = conn.execute(
-        "SELECT day_of_week, slot, subject FROM class_schedule"
-        " WHERE chat_id = ? ORDER BY day_of_week, slot",
-        (chat_id,),
-    ).fetchall()
+    rows = conn.execute(query, params).fetchall()
     conn.close()
 
     return [
@@ -326,9 +393,142 @@ def get_class_schedule(chat_id: int) -> list[dict]:
             "subject":     r["subject"],
             "start_time":  LESSON_TIMES[r["slot"] - 1] if 1 <= r["slot"] <= len(LESSON_TIMES) else "",
             "slot":        r["slot"],
+            "subgroup":    r["subgroup"],
+            "week_parity": r["week_parity"],
         }
         for r in rows
     ]
+
+
+# ── Подгруппа ученика ────────────────────────────────────────────────────────
+
+def set_user_subgroup(chat_id: int, user_id: int, subgroup: int) -> None:
+    """Запоминает, в какой подгруппе учится пользователь."""
+    conn = get_connection()
+    conn.execute(
+        "INSERT INTO user_subgroups (chat_id, user_id, subgroup) VALUES (?,?,?)"
+        " ON CONFLICT(chat_id, user_id) DO UPDATE SET subgroup=excluded.subgroup",
+        (chat_id, user_id, subgroup),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_user_subgroup(chat_id: int, user_id: int) -> int:
+    """Подгруппа пользователя. 0 — не выбрана, показываем всё."""
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT subgroup FROM user_subgroups WHERE chat_id = ? AND user_id = ?",
+        (chat_id, user_id),
+    ).fetchone()
+    conn.close()
+    return row["subgroup"] if row else 0
+
+
+def get_schedule_subgroups(chat_id: int) -> list[int]:
+    """Номера подгрупп, встречающихся в расписании класса (без нулевой)."""
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT DISTINCT subgroup FROM class_schedule"
+        " WHERE chat_id = ? AND subgroup > 0 ORDER BY subgroup",
+        (chat_id,),
+    ).fetchall()
+    conn.close()
+    return [r["subgroup"] for r in rows]
+
+
+# ── Чётность недель ──────────────────────────────────────────────────────────
+
+def set_parity_anchor(chat_id: int, anchor_date: str) -> None:
+    """Опорный понедельник нечётной недели — от него считается чётность."""
+    conn = get_connection()
+    conn.execute(
+        "INSERT INTO class_settings (chat_id, parity_anchor, updated_at) VALUES (?,?,?)"
+        " ON CONFLICT(chat_id) DO UPDATE SET"
+        "   parity_anchor=excluded.parity_anchor, updated_at=excluded.updated_at",
+        (chat_id, anchor_date, datetime.now().isoformat()),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_parity_anchor(chat_id: int) -> str | None:
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT parity_anchor FROM class_settings WHERE chat_id = ?", (chat_id,)
+    ).fetchone()
+    conn.close()
+    return row["parity_anchor"] if row and row["parity_anchor"] else None
+
+
+def schedule_has_parity(chat_id: int) -> bool:
+    """Есть ли в расписании уроки, зависящие от чётности недели."""
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT 1 FROM class_schedule WHERE chat_id = ? AND week_parity != '' LIMIT 1",
+        (chat_id,),
+    ).fetchone()
+    conn.close()
+    return row is not None
+
+
+# ── Замены уроков ────────────────────────────────────────────────────────────
+
+def save_override(
+    chat_id: int,
+    date_iso: str,
+    slot: int,
+    subject: str | None,
+    subgroup: int = 0,
+    note: str | None = None,
+) -> None:
+    """
+    Замена на конкретную дату. subject=None означает отмену урока.
+    Постоянное расписание при этом не меняется.
+    """
+    conn = get_connection()
+    conn.execute(
+        "INSERT INTO schedule_overrides (chat_id, date, slot, subgroup, subject, note, created_at)"
+        " VALUES (?,?,?,?,?,?,?)"
+        " ON CONFLICT(chat_id, date, slot, subgroup) DO UPDATE SET"
+        "   subject=excluded.subject, note=excluded.note, created_at=excluded.created_at",
+        (chat_id, date_iso, slot, subgroup, subject, note, datetime.now().isoformat()),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_overrides(chat_id: int, date_iso: str) -> list[dict]:
+    """Замены на конкретную дату."""
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT slot, subgroup, subject, note FROM schedule_overrides"
+        " WHERE chat_id = ? AND date = ? ORDER BY slot, subgroup",
+        (chat_id, date_iso),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def delete_override(chat_id: int, date_iso: str, slot: int, subgroup: int = 0) -> None:
+    """Отменяет замену — урок возвращается к постоянному расписанию."""
+    conn = get_connection()
+    conn.execute(
+        "DELETE FROM schedule_overrides"
+        " WHERE chat_id = ? AND date = ? AND slot = ? AND subgroup = ?",
+        (chat_id, date_iso, slot, subgroup),
+    )
+    conn.commit()
+    conn.close()
+
+
+def purge_old_overrides(before_date: str) -> int:
+    """Удаляет замены за прошедшие даты. Возвращает их число."""
+    conn = get_connection()
+    cur = conn.execute("DELETE FROM schedule_overrides WHERE date < ?", (before_date,))
+    conn.commit()
+    conn.close()
+    return cur.rowcount
 
 
 def has_class_schedule(chat_id: int) -> bool:
