@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import asyncio
-import itertools
 import logging
 import os
 import tempfile
@@ -27,15 +26,11 @@ from src.bot.keyboards import kb_hw_due_day
 from src.bot.utils import delete_after, fmt_due_date, is_chat_admin, safe_delete
 from src.core import db
 from src.core.constants import GROUP_TYPES
-from src.services import analytics, llm
+from src.services import analytics, llm, prefilter
 
 logger = logging.getLogger(__name__)
 
 router = Router()
-
-# ДЗ, ожидающие подтверждения дня сдачи. key → {subject, task, chat_id}
-_hw_counter = itertools.count()
-_pending_group_hw: dict[int, dict] = {}
 
 
 # ── Фоновый анализ сложности ──────────────────────────────────────────────────
@@ -66,7 +61,8 @@ async def _handle_group_message(message: Message, text: str | None = None, image
         if image_path:
             result = await llm.detect_group_homework_image(image_path, subjects)
         else:
-            if not text or len(text) < 10:
+            # Предфильтр отсекает переписку до платного вызова модели
+            if not prefilter.should_analyze(text):
                 return
             result = await llm.detect_group_homework(text, subjects)
     except Exception:
@@ -94,8 +90,9 @@ async def _handle_group_message(message: Message, text: str | None = None, image
             if e["subject"].strip().lower() == subject.strip().lower()
         ]
 
-    key = next(_hw_counter)
-    _pending_group_hw[key] = {"subject": subject, "task": task, "chat_id": message.chat.id}
+    # Очередь живёт в БД: рестарт бота между вопросом и нажатием кнопки
+    # больше не теряет задание
+    pending_id = db.save_pending_homework(message.chat.id, subject, task)
 
     if sched_entries:
         hint = ""
@@ -112,19 +109,33 @@ async def _handle_group_message(message: Message, text: str | None = None, image
         f"<b>{subject}</b> — {task}\n\n"
         f"📅 На какой день задали?{hint}",
         parse_mode="HTML",
-        reply_markup=kb_hw_due_day(key, sched_entries or None),
+        reply_markup=kb_hw_due_day(pending_id, sched_entries or None),
     )
+
+
+def _track_member(message: Message) -> None:
+    """
+    Запоминает автора сообщения как участника чата.
+    Каналы не учитываются — там нет from_user.
+    """
+    if message.from_user and not message.from_user.is_bot:
+        try:
+            db.remember_chat_member(message.chat.id, message.from_user.id)
+        except Exception:
+            logger.exception("Не удалось записать членство в чате")
 
 
 @router.message(F.chat.type.in_(GROUP_TYPES), F.text & ~F.text.startswith("/"))
 @router.channel_post(F.text & ~F.text.startswith("/"))
 async def handle_group_text(message: Message):
+    _track_member(message)
     await _handle_group_message(message, text=message.text)
 
 
 @router.message(F.chat.type.in_(GROUP_TYPES), F.photo)
 @router.channel_post(F.photo)
 async def handle_group_photo(message: Message):
+    _track_member(message)
     photo = message.photo[-1]
     file  = await message.bot.get_file(photo.file_id)
 
@@ -140,11 +151,11 @@ async def handle_group_photo(message: Message):
 
 @router.callback_query(F.data.startswith("hw|cd|"))
 async def cb_confirm_hw_day(call: CallbackQuery):
-    parts    = call.data.split("|")
-    key      = int(parts[2])
-    date_raw = parts[3]
+    parts      = call.data.split("|")
+    pending_id = int(parts[2])
+    date_raw   = parts[3]
 
-    pending = _pending_group_hw.pop(key, None)
+    pending = db.take_pending_homework(pending_id)
     if not pending:
         await call.answer("Задание уже обработано.", show_alert=True)
         return
@@ -281,6 +292,7 @@ def _build_hw_list(homework: list[dict], group_chat_id: int) -> tuple[str, Inlin
 @router.message(Command("hw"), F.chat.type.in_(GROUP_TYPES))
 @router.channel_post(Command("hw"))
 async def cmd_hw(message: Message):
+    _track_member(message)
     homework = db.get_chat_homework(message.chat.id)
 
     if not homework:
@@ -390,6 +402,7 @@ async def cb_hw_stats(call: CallbackQuery):
 @router.message(Command("stats"), F.chat.type.in_(GROUP_TYPES))
 @router.channel_post(Command("stats"))
 async def cmd_stats_group(message: Message):
+    _track_member(message)
     await safe_delete(message)
     status = await message.answer("📊 Генерирую график нагрузки...")
     try:
