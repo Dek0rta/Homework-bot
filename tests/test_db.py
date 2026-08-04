@@ -307,3 +307,90 @@ def test_estimate_cache_upsert(db):
 def test_estimate_cache_keys_are_independent(db):
     db.save_cached_estimate("hash-1", 45)
     assert db.get_cached_estimate("hash-2") is None
+
+
+# ── Общее расписание класса ──────────────────────────────────────────────────
+
+LESSONS = [
+    {"day": 0, "slot": 1, "subject": "Математика"},
+    {"day": 0, "slot": 2, "subject": "Физика"},
+    {"day": 1, "slot": 1, "subject": "Химия"},
+]
+
+
+def test_class_schedule_roundtrip(db):
+    assert db.save_class_schedule(-100, LESSONS) == 3
+    assert db.has_class_schedule(-100)
+
+    result = db.get_class_schedule(-100)
+    assert len(result) == 3
+    assert result[0]["subject"] == "Математика"
+    assert result[0]["day_of_week"] == 0
+    assert result[0]["slot"] == 1
+
+
+def test_class_schedule_derives_lesson_times(db):
+    """Время урока выводится из номера — отдельно вводить его не нужно."""
+    db.save_class_schedule(-100, LESSONS)
+    result = db.get_class_schedule(-100)
+    assert result[0]["start_time"] == "8:15"   # 1 урок
+    assert result[1]["start_time"] == "9:15"   # 2 урок
+
+
+def test_class_schedule_is_shared_by_all_members(db):
+    """
+    Суть продукта: настроил один — пользуются все.
+    get_schedule_for_chat отдаёт расписание класса без личной настройки.
+    """
+    db.save_class_schedule(-100, LESSONS)
+    assert len(db.get_schedule_for_chat(-100)) == 3
+    # При этом ни у кого нет личного расписания
+    assert not db.has_schedule(1)
+    assert not db.has_schedule(2)
+
+
+def test_class_schedule_replaces_previous(db):
+    db.save_class_schedule(-100, LESSONS)
+    db.save_class_schedule(-100, [{"day": 3, "slot": 1, "subject": "Биология"}])
+
+    result = db.get_class_schedule(-100)
+    assert len(result) == 1
+    assert result[0]["subject"] == "Биология"
+
+
+def test_class_schedules_isolated_between_chats(db):
+    db.save_class_schedule(-100, LESSONS)
+    db.save_class_schedule(-200, [{"day": 0, "slot": 1, "subject": "История"}])
+
+    assert db.get_class_schedule(-100)[0]["subject"] == "Математика"
+    assert db.get_class_schedule(-200)[0]["subject"] == "История"
+
+
+def test_class_subjects_extracted_for_detection(db):
+    """Предметы для детекции ДЗ берутся из расписания — /setup_subjects не нужен."""
+    db.save_class_schedule(-100, LESSONS)
+    assert sorted(db.get_class_subjects(-100)) == ["Математика", "Физика", "Химия"]
+
+
+def test_class_subjects_deduplicated(db):
+    db.save_class_schedule(-100, [
+        {"day": 0, "slot": 1, "subject": "Математика"},
+        {"day": 1, "slot": 1, "subject": "Математика"},
+        {"day": 2, "slot": 1, "subject": "Физика"},
+    ])
+    assert sorted(db.get_class_subjects(-100)) == ["Математика", "Физика"]
+
+
+def test_class_schedule_wins_over_owner_schedule(db):
+    """Общее расписание класса приоритетнее личного расписания владельца."""
+    db.save_schedule(1, [{"day": 0, "subject": "Личное", "start_time": "8:15"}])
+    db.set_chat_schedule_owner(-100, 1)
+    assert db.get_schedule_for_chat(-100)[0]["subject"] == "Личное"
+
+    db.save_class_schedule(-100, LESSONS)
+    assert db.get_schedule_for_chat(-100)[0]["subject"] == "Математика"
+
+
+def test_empty_class_schedule_is_not_reported_as_set(db):
+    assert not db.has_class_schedule(-999)
+    assert db.get_class_schedule(-999) == []

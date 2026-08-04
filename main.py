@@ -15,7 +15,7 @@ from aiogram.types import (
 )
 
 from src.api import webapp_api
-from src.bot import handlers_group, handlers_private
+from src.bot import handlers_group, handlers_private, onboarding
 from src.bot.backup import restore_if_empty
 from src.core import db
 from src.core.config import ADMIN_USER_ID, BOT_TOKEN, FSM_PATH
@@ -45,10 +45,11 @@ PRIVATE_COMMANDS = [
 
 GROUP_COMMANDS = [
     BotCommand(command="hw",             description="Список домашних заданий"),
+    BotCommand(command="schedule",       description="Расписание класса"),
     BotCommand(command="stats",          description="График нагрузки класса"),
+    BotCommand(command="setup",          description="Настроить расписание по фото"),
     BotCommand(command="export_csv",     description="Экспорт данных нагрузки в CSV"),
-    BotCommand(command="setup_subjects", description="Настроить предметы (только admin)"),
-    BotCommand(command="link_schedule",  description="Привязать расписание к группе (только admin)"),
+    BotCommand(command="setup_subjects", description="Изменить предметы вручную (только admin)"),
     BotCommand(command="clear_hw",       description="Очистить список ДЗ (только admin)"),
     BotCommand(command="help",           description="Справка"),
 ]
@@ -89,7 +90,10 @@ async def main() -> None:
     bot = Bot(token=BOT_TOKEN)
     dp  = Dispatcher(storage=JsonStorage(FSM_PATH))
 
-    # Личные хендлеры первыми: их фильтры уже, групповые ловят остальное
+    # Онбординг первым: во время настройки фото и текст — это расписание,
+    # а не домашнее задание. Дальше личные хендлеры (их фильтры уже),
+    # групповые ловят остальное.
+    dp.include_router(onboarding.router)
     dp.include_router(handlers_private.router)
     dp.include_router(handlers_group.router)
 
@@ -100,7 +104,8 @@ async def main() -> None:
     await start_http_server()
     await dp.start_polling(
         bot,
-        allowed_updates=["message", "callback_query", "channel_post"],
+        # my_chat_member нужен, чтобы поздороваться сразу при добавлении в группу
+        allowed_updates=["message", "callback_query", "channel_post", "my_chat_member"],
     )
 
 

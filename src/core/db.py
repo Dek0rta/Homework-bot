@@ -93,6 +93,19 @@ def init_db():
             PRIMARY KEY (chat_id, user_id)
         )
     """)
+    # Расписание класса — общее для всех участников чата.
+    # Один ученик настраивает, остальные пользуются без своего сетапа.
+    # Личное расписание (таблица schedule) остаётся для тех, кто хочет своё.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS class_schedule (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id     INTEGER NOT NULL,
+            day_of_week INTEGER NOT NULL,
+            slot        INTEGER NOT NULL,
+            subject     TEXT    NOT NULL,
+            UNIQUE(chat_id, day_of_week, slot)
+        )
+    """)
     # ДЗ, ожидающие выбора дня сдачи. Раньше лежали в словаре в памяти —
     # рестарт бота терял их, и кнопка отвечала «задание уже обработано».
     conn.execute("""
@@ -274,13 +287,83 @@ def set_chat_schedule_owner(chat_id: int, owner_id: int):
     conn.close()
 
 
+def save_class_schedule(chat_id: int, lessons: list[dict]) -> int:
+    """
+    Сохраняет расписание класса целиком, заменяя прежнее.
+    lessons = [{"day": 0, "slot": 1, "subject": "Математика"}, ...]
+    Возвращает число сохранённых уроков.
+    """
+    conn = get_connection()
+    conn.execute("DELETE FROM class_schedule WHERE chat_id = ?", (chat_id,))
+    conn.executemany(
+        "INSERT OR REPLACE INTO class_schedule (chat_id, day_of_week, slot, subject)"
+        " VALUES (?,?,?,?)",
+        [(chat_id, l["day"], l["slot"], l["subject"]) for l in lessons],
+    )
+    conn.commit()
+    conn.close()
+    return len(lessons)
+
+
+def get_class_schedule(chat_id: int) -> list[dict]:
+    """
+    Расписание класса в формате, совместимом с личным:
+    day_of_week, subject, start_time (время выводится из номера урока).
+    """
+    from src.core.constants import LESSON_TIMES
+
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT day_of_week, slot, subject FROM class_schedule"
+        " WHERE chat_id = ? ORDER BY day_of_week, slot",
+        (chat_id,),
+    ).fetchall()
+    conn.close()
+
+    return [
+        {
+            "day_of_week": r["day_of_week"],
+            "subject":     r["subject"],
+            "start_time":  LESSON_TIMES[r["slot"] - 1] if 1 <= r["slot"] <= len(LESSON_TIMES) else "",
+            "slot":        r["slot"],
+        }
+        for r in rows
+    ]
+
+
+def has_class_schedule(chat_id: int) -> bool:
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT 1 FROM class_schedule WHERE chat_id = ? LIMIT 1", (chat_id,)
+    ).fetchone()
+    conn.close()
+    return row is not None
+
+
+def get_class_subjects(chat_id: int) -> list[str]:
+    """Уникальные предметы из расписания класса — для автонастройки детекции ДЗ."""
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT DISTINCT subject FROM class_schedule WHERE chat_id = ? ORDER BY subject",
+        (chat_id,),
+    ).fetchall()
+    conn.close()
+    return [r["subject"] for r in rows]
+
+
 def get_schedule_for_chat(chat_id: int) -> list[dict]:
     """
-    Расписание, действующее для конкретного чата — через его schedule_owner.
-    Пустой список, если владелец не назначен или у него нет расписания.
+    Расписание, действующее для чата. Приоритет:
+      1. общее расписание класса (class_schedule)
+      2. личное расписание назначенного владельца — для обратной совместимости
+
     Намеренно без фолбэка «первое расписание в БД»: он выдавал бы одному
     классу расписание другого.
     """
+    class_entries = get_class_schedule(chat_id)
+    if class_entries:
+        return class_entries
+
     owner_id = get_chat_schedule_owner(chat_id)
     return get_schedule(owner_id) if owner_id else []
 

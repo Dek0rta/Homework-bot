@@ -22,10 +22,11 @@ from aiogram.types import (
     ReactionTypeEmoji,
 )
 
+from src.bot import onboarding
 from src.bot.keyboards import kb_hw_due_day
 from src.bot.utils import delete_after, fmt_due_date, is_chat_admin, safe_delete
 from src.core import db
-from src.core.constants import GROUP_TYPES
+from src.core.constants import DAYS_RU, GROUP_TYPES
 from src.services import analytics, llm, prefilter
 
 logger = logging.getLogger(__name__)
@@ -129,6 +130,11 @@ def _track_member(message: Message) -> None:
 @router.channel_post(F.text & ~F.text.startswith("/"))
 async def handle_group_text(message: Message):
     _track_member(message)
+
+    # Чат в режиме настройки — сообщение может оказаться расписанием
+    if await onboarding.try_parse_schedule_text(message):
+        return
+
     await _handle_group_message(message, text=message.text)
 
 
@@ -136,6 +142,11 @@ async def handle_group_text(message: Message):
 @router.channel_post(F.photo)
 async def handle_group_photo(message: Message):
     _track_member(message)
+
+    # Во время настройки фото — это расписание, а не ДЗ
+    if await onboarding.try_parse_schedule_photo(message):
+        return
+
     photo = message.photo[-1]
     file  = await message.bot.get_file(photo.file_id)
 
@@ -322,6 +333,35 @@ async def cmd_hw(message: Message):
         # Бот заблокирован или диалога с пользователем ещё нет
         notify = await message.answer(text, parse_mode="HTML", reply_markup=kb)
     asyncio.create_task(delete_after(notify))
+
+
+@router.message(Command("schedule"), F.chat.type.in_(GROUP_TYPES))
+@router.channel_post(Command("schedule"))
+async def cmd_schedule_group(message: Message):
+    """Расписание класса. Общее для всех — настраивал кто-то один."""
+    _track_member(message)
+    entries = db.get_class_schedule(message.chat.id)
+
+    if not entries:
+        await message.reply(
+            "Расписание ещё не настроено.\n"
+            "Пришлите фото расписания командой /setup — я распознаю его сам."
+        )
+        return
+
+    by_day: dict[int, list] = {}
+    for e in entries:
+        by_day.setdefault(e["day_of_week"], []).append(e)
+
+    lines = ["📅 <b>Расписание класса</b>\n"]
+    for day in sorted(by_day):
+        lines.append(f"<b>{DAYS_RU[day]}</b>")
+        for e in sorted(by_day[day], key=lambda x: x["slot"]):
+            time = f" · {e['start_time']}" if e["start_time"] else ""
+            lines.append(f"  {e['slot']}. {e['subject']}{time}")
+        lines.append("")
+
+    await message.reply("\n".join(lines).rstrip(), parse_mode="HTML")
 
 
 @router.message(Command("clear_hw"), F.chat.type.in_(GROUP_TYPES))

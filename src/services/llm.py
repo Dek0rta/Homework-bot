@@ -123,6 +123,108 @@ async def ask_text(prompt: str) -> str:
     return await _chat([{"role": "user", "content": prompt}], _TEXT_MODEL)
 
 
+# ── Распознавание расписания ─────────────────────────────────────────────────
+
+_SCHEDULE_PROMPT = """\
+На изображении — школьное расписание уроков. Распознай его целиком.
+
+Верни СТРОГО JSON без markdown:
+{"lessons":[{"day":<0-6>,"slot":<1-8>,"subject":"..."}],"confidence":<0.0-1.0>}
+
+day:     0=Понедельник, 1=Вторник, 2=Среда, 3=Четверг, 4=Пятница, 5=Суббота
+slot:    порядковый номер урока в этот день, начиная с 1
+subject: название предмета как написано, но в читаемом виде
+         («матем.» → «Математика», «физ-ра» → «Физкультура»)
+
+Правила:
+— Расписание может быть таблицей: дни в столбцах или в строках. Определи ориентацию сам.
+— Пустые клетки, окна и «нет урока» пропускай — не добавляй их в lessons.
+— Если номера уроков не подписаны, нумеруй сверху вниз в пределах дня.
+— Время уроков игнорируй, нужен только порядковый номер.
+— Классный час, факультатив и подобное — тоже уроки, включай их.
+— confidence: насколько уверенно прочитано изображение (0.0–1.0).
+— Если на изображении нет расписания уроков, верни {"lessons":[],"confidence":0.0}\
+"""
+
+
+def _normalize_schedule(data: dict) -> dict:
+    """
+    Приводит ответ модели к безопасному виду: отбрасывает мусорные записи,
+    убирает дубли одного слота и сортирует по дню и номеру урока.
+    """
+    seen: set[tuple[int, int]] = set()
+    lessons = []
+
+    for item in data.get("lessons") or []:
+        try:
+            day     = int(item["day"])
+            slot    = int(item["slot"])
+            subject = str(item.get("subject", "")).strip()
+        except (KeyError, TypeError, ValueError):
+            continue
+
+        if not subject or not (0 <= day <= 6) or not (1 <= slot <= 8):
+            continue
+        if (day, slot) in seen:
+            continue
+
+        seen.add((day, slot))
+        lessons.append({"day": day, "slot": slot, "subject": subject})
+
+    lessons.sort(key=lambda x: (x["day"], x["slot"]))
+
+    try:
+        confidence = float(data.get("confidence", 0))
+    except (TypeError, ValueError):
+        confidence = 0.0
+
+    return {"lessons": lessons, "confidence": max(0.0, min(1.0, confidence))}
+
+
+async def parse_schedule_image(image_path: str) -> dict:
+    """
+    Распознаёт расписание на фото.
+    Возвращает {"lessons": [{"day", "slot", "subject"}], "confidence": float}.
+    Пустой список lessons означает, что расписание не распознано.
+    """
+    with open(image_path, "rb") as f:
+        image_b64 = base64.b64encode(f.read()).decode("utf-8")
+
+    mime = "image/png" if image_path.lower().endswith(".png") else "image/jpeg"
+    messages = [{
+        "role": "user",
+        "content": [
+            {"type": "text",      "text": _SCHEDULE_PROMPT},
+            {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{image_b64}"}},
+        ],
+    }]
+
+    raw = await _chat(messages, _VISION_MODEL)
+    logger.debug("Schedule image raw: %s", raw)
+    try:
+        return _normalize_schedule(_extract_json(raw))
+    except Exception:
+        logger.warning("Не удалось разобрать расписание из ответа модели")
+        return {"lessons": [], "confidence": 0.0}
+
+
+async def parse_schedule_text(text: str) -> dict:
+    """Распознаёт расписание из текстового сообщения в произвольном формате."""
+    prompt = (
+        "Ниже текст школьного расписания в произвольном формате.\n\n"
+        + _SCHEDULE_PROMPT.replace("На изображении —", "В тексте —")
+        + "\n\nТекст:\n"
+        + text
+    )
+    raw = await _chat([{"role": "user", "content": prompt}], _TEXT_MODEL)
+    logger.debug("Schedule text raw: %s", raw)
+    try:
+        return _normalize_schedule(_extract_json(raw))
+    except Exception:
+        logger.warning("Не удалось разобрать расписание из текста")
+        return {"lessons": [], "confidence": 0.0}
+
+
 async def parse_homework_text(text: str, schedule: list[dict]) -> dict:
     """Парсит ДЗ из текста. Промпт строится конкатенацией — безопасно для любого текста."""
     prompt = (
