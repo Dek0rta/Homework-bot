@@ -29,6 +29,7 @@ import os
 import re
 from datetime import date, datetime, timedelta
 from typing import Any
+from urllib.parse import urlparse
 
 from aiohttp import web
 
@@ -43,18 +44,63 @@ logger = logging.getLogger(__name__)
 #
 # Origin ограничен адресом WebApp: с "*" любая сторонняя страница могла бы
 # слать запросы от имени открывшего её пользователя.
+#
+# Запросы приходят из двух источников:
+#   • Mini App внутри Telegram — Origin равен WEB_APP_URL
+#   • сам Telegram (web.telegram.org) при открытии приложения в браузере
+# Оба разрешены явным списком; всё остальное отклоняется.
 
-def _cors_headers() -> dict[str, str]:
-    return {
-        "Access-Control-Allow-Origin":  os.getenv("WEB_APP_URL", "").rstrip("/") or "null",
-        "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type, X-Telegram-Init-Data, X-Debug-User-Id",
-        "Vary": "Origin",
-    }
+_TELEGRAM_ORIGINS = frozenset({
+    "https://web.telegram.org",
+    "https://webk.telegram.org",
+    "https://webz.telegram.org",
+})
 
 
-async def _cors_preflight(_request: web.Request) -> web.Response:
-    return web.Response(status=204, headers=_cors_headers())
+def _origin_of(url: str) -> str:
+    """https://app.example.com/path → https://app.example.com (Origin без пути)."""
+    if not url:
+        return ""
+    parsed = urlparse(url if "//" in url else f"https://{url}")
+    if not parsed.scheme or not parsed.netloc:
+        return ""
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+def allowed_origins() -> frozenset[str]:
+    configured = _origin_of(os.getenv("WEB_APP_URL", ""))
+    return frozenset({configured} | set(_TELEGRAM_ORIGINS)) if configured else _TELEGRAM_ORIGINS
+
+
+@web.middleware
+async def cors_middleware(request: web.Request, handler):
+    """
+    Ставит CORS-заголовки на все ответы, включая ошибки и preflight.
+
+    Origin запроса отражается, только если он в списке разрешённых.
+    Этот заголовок ставит сам браузер и подделать его со страницы нельзя,
+    поэтому отражение безопасно — и, в отличие от одного жёстко заданного
+    значения, не ломает API, когда WEB_APP_URL не задан.
+    """
+    if request.method == "OPTIONS":
+        response = web.Response(status=204)
+    else:
+        try:
+            response = await handler(request)
+        except web.HTTPException as exc:
+            response = exc
+
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = (
+        "Content-Type, X-Telegram-Init-Data, X-Debug-User-Id"
+    )
+    response.headers["Vary"] = "Origin"
+
+    origin = request.headers.get("Origin", "")
+    if origin and origin in allowed_origins():
+        response.headers["Access-Control-Allow-Origin"] = origin
+
+    return response
 
 
 def _json(data: Any, status: int = 200) -> web.Response:
@@ -62,7 +108,6 @@ def _json(data: Any, status: int = 200) -> web.Response:
         text=json.dumps(data, ensure_ascii=False),
         content_type="application/json",
         status=status,
-        headers=_cors_headers(),
     )
 
 
@@ -75,6 +120,18 @@ def _authed(handler):
         try:
             user_id = authenticate(request)
         except AuthError as exc:
+            # Отсутствующий заголовок почти всегда означает устаревший фронт:
+            # версии до введения проверки подписи его не отправляли.
+            if not request.headers.get("X-Telegram-Init-Data"):
+                logger.warning(
+                    "Запрос без X-Telegram-Init-Data к %s — вероятно, WebApp "
+                    "задеплоен старой версией и требует пересборки",
+                    request.path,
+                )
+                return _json({
+                    "error":  "unauthorized: missing initData",
+                    "detail": "Приложение устарело. Закрой и открой его заново.",
+                }, status=401)
             return _json({"error": f"unauthorized: {exc}"}, status=401)
         try:
             return await handler(request, user_id)
@@ -422,4 +479,6 @@ def setup_webapp_routes(app: web.Application) -> None:
     app.router.add_get   ("/api/grade-targets", handle_get_grade_targets)
     app.router.add_post  ("/api/grade-targets", handle_post_grade_target)
 
-    app.router.add_route ("OPTIONS", "/api/{tail:.*}", _cors_preflight)
+    # Preflight и CORS-заголовки обслуживает cors_middleware,
+    # подключённый при создании приложения.
+    app.router.add_route("OPTIONS", "/api/{tail:.*}", lambda _r: web.Response(status=204))

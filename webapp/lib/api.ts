@@ -31,6 +31,19 @@ function jsonHeaders(): Record<string, string> {
   return authHeaders({ 'Content-Type': 'application/json' });
 }
 
+/**
+ * Message shown when the backend rejects our credentials. Usually means the
+ * page was loaded outside Telegram, or a stale build is still cached.
+ */
+export const AUTH_ERROR_MESSAGE =
+  'Не удалось подтвердить вход. Закрой приложение и открой его заново из Telegram.';
+
+/** Throws a readable error for auth failures, passes everything else through. */
+function assertOk(res: Response, context: string): void {
+  if (res.status === 401) throw new Error(AUTH_ERROR_MESSAGE);
+  if (!res.ok) throw new Error(`${context}: ${res.status}`);
+}
+
 function sleep(ms: number) {
   return new Promise(r => setTimeout(r, ms));
 }
@@ -44,7 +57,7 @@ async function compressPhotos(files: File[]): Promise<string[]> {
 export async function fetchHomework(): Promise<Homework[]> {
   if (USE_MOCK) { await sleep(400); return [...MOCK_HOMEWORK]; }
   const res = await fetch(`${API_URL}/api/homework`, { headers: authHeaders() });
-  if (!res.ok) throw new Error(`fetchHomework: ${res.status}`);
+  assertOk(res, 'fetchHomework');
   return res.json();
 }
 
@@ -79,7 +92,7 @@ export async function addHomework(
       photos,
     }),
   });
-  if (!res.ok) throw new Error(`addHomework: ${res.status}`);
+  assertOk(res, 'addHomework');
   return res.json();
 }
 
@@ -117,7 +130,7 @@ export async function updateHomework(
       photos,
     }),
   });
-  if (!res.ok) throw new Error(`updateHomework: ${res.status}`);
+  assertOk(res, 'updateHomework');
   return res.json();
 }
 
@@ -217,7 +230,7 @@ export async function addGrade(
     headers: jsonHeaders(),
     body:    JSON.stringify({ userId, subject, value, note }),
   });
-  if (!res.ok) throw new Error(`addGrade: ${res.status}`);
+  assertOk(res, 'addGrade');
   return res.json();
 }
 

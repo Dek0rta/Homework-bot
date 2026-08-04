@@ -19,6 +19,7 @@ from src.bot import handlers_group, handlers_private
 from src.bot.backup import restore_if_empty
 from src.core import db
 from src.core.config import ADMIN_USER_ID, BOT_TOKEN, FSM_PATH
+from src.core.startup_checks import ConfigError, run_startup_checks
 from src.core.storage import JsonStorage
 from src.services import analytics
 from src.services import calendar as calendar_api
@@ -58,7 +59,7 @@ async def start_http_server() -> None:
     from aiohttp import web
 
     port = int(os.getenv("PORT", 8080))
-    app  = web.Application()
+    app  = web.Application(middlewares=[webapp_api.cors_middleware])
     app.router.add_get("/", lambda _r: web.Response(text="OK"))
     webapp_api.setup_webapp_routes(app)
 
@@ -69,6 +70,8 @@ async def start_http_server() -> None:
 
 
 async def main() -> None:
+    run_startup_checks()
+
     # Порядок важен: analytics создаёт daily_load_metrics поверх схемы init_db.
     db.init_db()
     analytics.migrate_analytics_schema()
@@ -102,4 +105,11 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except ConfigError as exc:
+        # Ошибка настройки — сообщение самодостаточно, стектрейс только мешает
+        print(f"\nОшибка конфигурации:\n{exc}\n")
+        raise SystemExit(1)
+    except KeyboardInterrupt:
+        logger.info("Остановлено пользователем")
