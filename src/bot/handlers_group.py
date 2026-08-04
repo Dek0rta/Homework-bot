@@ -102,6 +102,8 @@ async def _try_handle_override(message: Message, text: str, subjects: list[str])
         note=f"из сообщения: {text[:80]}",
     )
 
+    db.log_event("override_added", chat_id=message.chat.id,
+                 payload={"cancelled": cancelled})
     try:
         await message.react([ReactionTypeEmoji(emoji="✍️")])
     except Exception:
@@ -196,12 +198,12 @@ async def _handle_group_message(message: Message, text: str | None = None, image
 
     if sched_entries:
         hint = ""
-    elif owner_id:
+    elif db.has_class_schedule(message.chat.id):
         hint = "\n\n<i>⚠️ Предмет не найден в расписании — выбери день вручную.</i>"
     else:
         hint = (
-            "\n\n<i>⚠️ Расписание не привязано. "
-            "Запусти /link_schedule чтобы даты подбирались автоматически.</i>"
+            "\n\n<i>⚠️ Расписание не настроено. "
+            "Пришлите фото расписания через /setup — даты будут подбираться сами.</i>"
         )
 
     await message.reply(
@@ -290,6 +292,8 @@ async def cb_confirm_hw_day(call: CallbackQuery):
         due_text = f"\n📅 Сдать: <b>{fmt_due_date(due_date)}</b>"
 
     hw_id = db.save_chat_homework(pending["chat_id"], pending["subject"], pending["task"], due_date)
+    db.log_event("homework_added", chat_id=pending["chat_id"], user_id=call.from_user.id,
+                 payload={"has_due_date": due_date is not None})
 
     if due_date:
         asyncio.create_task(_analyze_hw_async(

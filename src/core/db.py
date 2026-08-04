@@ -145,6 +145,34 @@ def init_db():
             updated_at        TEXT NOT NULL
         )
     """)
+    # Подписка на вечерние напоминания.
+    # Telegram не даёт боту писать первым, поэтому подписка возможна только
+    # после того, как пользователь сам открыл личный чат с ботом.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS reminder_subscriptions (
+            user_id     INTEGER PRIMARY KEY,
+            chat_id     INTEGER NOT NULL,   -- класс, о котором напоминаем
+            send_at     TEXT    NOT NULL DEFAULT '19:00',
+            enabled     INTEGER NOT NULL DEFAULT 1,
+            last_sent   TEXT,               -- YYYY-MM-DD, чтобы не слать дважды
+            created_at  TEXT    NOT NULL
+        )
+    """)
+    # Журнал продуктовых событий. Нужен, чтобы видеть, где отваливаются
+    # пользователи, и не гадать о причинах. Без текстов сообщений.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS events (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            event      TEXT    NOT NULL,
+            chat_id    INTEGER,
+            user_id    INTEGER,
+            payload    TEXT,               -- JSON с числами, без личных данных
+            created_at TEXT    NOT NULL
+        )
+    """)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_events_event_date ON events(event, created_at)"
+    )
     # ДЗ, ожидающие выбора дня сдачи. Раньше лежали в словаре в памяти —
     # рестарт бота терял их, и кнопка отвечала «задание уже обработано».
     conn.execute("""
@@ -529,6 +557,137 @@ def purge_old_overrides(before_date: str) -> int:
     conn.commit()
     conn.close()
     return cur.rowcount
+
+
+# ── Подписка на напоминания ──────────────────────────────────────────────────
+
+def subscribe_reminders(user_id: int, chat_id: int, send_at: str = "19:00") -> None:
+    conn = get_connection()
+    conn.execute(
+        "INSERT INTO reminder_subscriptions (user_id, chat_id, send_at, enabled, created_at)"
+        " VALUES (?,?,?,1,?)"
+        " ON CONFLICT(user_id) DO UPDATE SET"
+        "   chat_id=excluded.chat_id, send_at=excluded.send_at, enabled=1",
+        (user_id, chat_id, send_at, datetime.now().isoformat()),
+    )
+    conn.commit()
+    conn.close()
+
+
+def unsubscribe_reminders(user_id: int) -> None:
+    """Выключает напоминания, не теряя настройки времени."""
+    conn = get_connection()
+    conn.execute("UPDATE reminder_subscriptions SET enabled=0 WHERE user_id=?", (user_id,))
+    conn.commit()
+    conn.close()
+
+
+def get_subscription(user_id: int) -> dict | None:
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT user_id, chat_id, send_at, enabled, last_sent"
+        " FROM reminder_subscriptions WHERE user_id = ?",
+        (user_id,),
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def due_subscriptions(now_hhmm: str, today_iso: str) -> list[dict]:
+    """
+    Подписки, которым пора отправить напоминание: время наступило и сегодня
+    ещё не отправляли. Сравнение по «<=», чтобы пропущенная минута
+    (перезапуск, лаг) не съедала напоминание целиком.
+    """
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT user_id, chat_id, send_at FROM reminder_subscriptions"
+        " WHERE enabled = 1 AND send_at <= ?"
+        "   AND (last_sent IS NULL OR last_sent < ?)",
+        (now_hhmm, today_iso),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def mark_reminder_sent(user_id: int, today_iso: str) -> None:
+    conn = get_connection()
+    conn.execute(
+        "UPDATE reminder_subscriptions SET last_sent=? WHERE user_id=?",
+        (today_iso, user_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def count_subscribers(chat_id: int) -> int:
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT COUNT(*) FROM reminder_subscriptions WHERE chat_id=? AND enabled=1",
+        (chat_id,),
+    ).fetchone()
+    conn.close()
+    return row[0]
+
+
+# ── Журнал событий ───────────────────────────────────────────────────────────
+
+def log_event(
+    event: str,
+    chat_id: int | None = None,
+    user_id: int | None = None,
+    payload: dict | None = None,
+) -> None:
+    """
+    Записывает продуктовое событие. Тексты сообщений и заданий сюда не
+    попадают — только счётчики и идентификаторы, чтобы журнал оставался
+    безопасным для анализа.
+    """
+    import json as _json
+
+    try:
+        conn = get_connection()
+        conn.execute(
+            "INSERT INTO events (event, chat_id, user_id, payload, created_at)"
+            " VALUES (?,?,?,?,?)",
+            (
+                event,
+                chat_id,
+                user_id,
+                _json.dumps(payload, ensure_ascii=False) if payload else None,
+                datetime.now().isoformat(),
+            ),
+        )
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass  # аналитика не должна ломать основной сценарий
+
+
+def event_counts(since_iso: str | None = None) -> dict[str, int]:
+    """Сколько раз случилось каждое событие — основа продуктовых метрик."""
+    conn = get_connection()
+    if since_iso:
+        rows = conn.execute(
+            "SELECT event, COUNT(*) FROM events WHERE created_at >= ? GROUP BY event",
+            (since_iso,),
+        ).fetchall()
+    else:
+        rows = conn.execute("SELECT event, COUNT(*) FROM events GROUP BY event").fetchall()
+    conn.close()
+    return {r[0]: r[1] for r in rows}
+
+
+def active_chats(since_iso: str) -> int:
+    """Число классов, где что-то происходило после указанной даты."""
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT COUNT(DISTINCT chat_id) FROM events"
+        " WHERE chat_id IS NOT NULL AND created_at >= ?",
+        (since_iso,),
+    ).fetchone()
+    conn.close()
+    return row[0]
 
 
 def has_class_schedule(chat_id: int) -> bool:

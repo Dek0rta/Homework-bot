@@ -15,7 +15,14 @@ from aiogram.types import (
 )
 
 from src.api import webapp_api
-from src.bot import handlers_group, handlers_private, onboarding
+from src.bot import (
+    handlers_edit,
+    handlers_group,
+    handlers_metrics,
+    handlers_private,
+    handlers_reminders,
+    onboarding,
+)
 from src.bot.backup import restore_if_empty
 from src.core import db
 from src.core.config import ADMIN_USER_ID, BOT_TOKEN, FSM_PATH
@@ -23,6 +30,7 @@ from src.core.startup_checks import ConfigError, run_startup_checks
 from src.core.storage import JsonStorage
 from src.services import analytics
 from src.services import calendar as calendar_api
+from src.services import reminders
 
 logging.basicConfig(
     level=logging.INFO,
@@ -35,6 +43,7 @@ PRIVATE_COMMANDS = [
     BotCommand(command="start",       description="Главное меню"),
     BotCommand(command="schedule",    description="Изменить расписание"),
     BotCommand(command="my_schedule", description="Посмотреть расписание"),
+    BotCommand(command="reminders",   description="Напоминания о домашке"),
     BotCommand(command="stats",       description="График нагрузки класса"),
     BotCommand(command="backup",      description="Резервная копия расписания"),
     BotCommand(command="auth",        description="Подключить Google Calendar"),
@@ -47,11 +56,13 @@ GROUP_COMMANDS = [
     BotCommand(command="today",       description="Что сегодня"),
     BotCommand(command="tomorrow",    description="Что завтра"),
     BotCommand(command="hw",          description="Список домашних заданий"),
+    BotCommand(command="reminders",   description="Напоминания о домашке"),
     BotCommand(command="schedule",    description="Расписание на неделю"),
     BotCommand(command="my_group",    description="Выбрать свою подгруппу"),
     BotCommand(command="set_week",    description="Указать текущую неделю"),
     BotCommand(command="stats",       description="График нагрузки класса"),
     BotCommand(command="setup",       description="Настроить расписание по фото"),
+    BotCommand(command="edit",        description="Поправить расписание (только admin)"),
     BotCommand(command="undo_change", description="Отменить последнюю замену"),
     BotCommand(command="clear_hw",    description="Очистить список ДЗ (только admin)"),
     BotCommand(command="help",        description="Справка"),
@@ -97,6 +108,9 @@ async def main() -> None:
     # а не домашнее задание. Дальше личные хендлеры (их фильтры уже),
     # групповые ловят остальное.
     dp.include_router(onboarding.router)
+    dp.include_router(handlers_reminders.router)
+    dp.include_router(handlers_metrics.router)
+    dp.include_router(handlers_edit.router)
     dp.include_router(handlers_private.router)
     dp.include_router(handlers_group.router)
 
@@ -105,6 +119,9 @@ async def main() -> None:
 
     logger.info("Бот запущен")
     await start_http_server()
+
+    # Вечерние напоминания — единственная причина открыть бота завтра
+    asyncio.create_task(reminders.scheduler_loop(bot))
     await dp.start_polling(
         bot,
         # my_chat_member нужен, чтобы поздороваться сразу при добавлении в группу

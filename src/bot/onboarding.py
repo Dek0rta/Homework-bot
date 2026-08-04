@@ -113,6 +113,7 @@ async def on_added_to_chat(event: ChatMemberUpdated):
     if db.has_class_schedule(event.chat.id):
         return  # чат уже настроен — например, бота вернули после удаления
 
+    db.log_event("bot_added", chat_id=event.chat.id)
     start_awaiting(event.chat.id)
     await event.bot.send_message(event.chat.id, WELCOME, parse_mode="HTML")
 
@@ -195,9 +196,13 @@ async def _handle_parsed(status: Message, chat_id: int, result: dict) -> None:
     confidence = result.get("confidence", 0.0)
 
     if not lessons or confidence < MIN_CONFIDENCE:
+        db.log_event("schedule_failed", chat_id=chat_id,
+                     payload={"confidence": round(confidence, 2)})
         await status.edit_text(NOT_RECOGNIZED, parse_mode="HTML")
         return
 
+    db.log_event("schedule_recognized", chat_id=chat_id,
+                 payload={"lessons": len(lessons), "confidence": round(confidence, 2)})
     _pending_schedule[chat_id] = lessons
     await status.edit_text(
         _format_preview(lessons),
@@ -218,6 +223,8 @@ async def cb_save_schedule(call: CallbackQuery):
     await call.answer()
 
     count = db.save_class_schedule(chat_id, lessons)
+    db.log_event("schedule_saved", chat_id=chat_id, user_id=call.from_user.id,
+                 payload={"lessons": count})
 
     # Предметы для детекции ДЗ выводим из расписания — отдельная настройка не нужна
     subjects = db.get_class_subjects(chat_id)
@@ -244,5 +251,6 @@ async def cb_save_schedule(call: CallbackQuery):
 async def cb_retry(call: CallbackQuery):
     await call.answer()
     _pending_schedule.pop(call.message.chat.id, None)
+    db.log_event("schedule_retry", chat_id=call.message.chat.id)
     start_awaiting(call.message.chat.id)
     await call.message.edit_text("📸 Хорошо, пришлите другое фото расписания.")
