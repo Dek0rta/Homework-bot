@@ -18,9 +18,10 @@ from src.api import webapp_api
 from src.bot import handlers_group, handlers_private
 from src.bot.backup import restore_if_empty
 from src.core import db
-from src.core.config import BOT_TOKEN, FSM_PATH
+from src.core.config import ADMIN_USER_ID, BOT_TOKEN, FSM_PATH
 from src.core.storage import JsonStorage
 from src.services import analytics
+from src.services import calendar as calendar_api
 
 logging.basicConfig(
     level=logging.INFO,
@@ -36,6 +37,7 @@ PRIVATE_COMMANDS = [
     BotCommand(command="stats",       description="График нагрузки класса"),
     BotCommand(command="backup",      description="Резервная копия расписания"),
     BotCommand(command="auth",        description="Подключить Google Calendar"),
+    BotCommand(command="disconnect_calendar", description="Отвязать Google Calendar"),
     BotCommand(command="cancel",      description="Отменить текущее действие"),
     BotCommand(command="help",        description="Справка по командам"),
 ]
@@ -67,11 +69,14 @@ async def start_http_server() -> None:
 
 
 async def main() -> None:
-    # Порядок важен: analytics создаёт daily_load_metrics, от которой
-    # зависит db.get_all_group_chat_ids().
+    # Порядок важен: analytics создаёт daily_load_metrics поверх схемы init_db.
     db.init_db()
     analytics.migrate_analytics_schema()
     restore_if_empty()
+
+    # Старый общий data/token.json переезжает в БД как токен администратора.
+    # До этого он использовался для всех пользователей сразу.
+    calendar_api.migrate_legacy_token(ADMIN_USER_ID)
 
     bot = Bot(token=BOT_TOKEN)
     dp  = Dispatcher(storage=JsonStorage(FSM_PATH))

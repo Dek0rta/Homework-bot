@@ -71,6 +71,17 @@ def init_db():
             PRIMARY KEY (user_id, subject)
         )
     """)
+    # OAuth-токен Google Calendar на каждого пользователя.
+    # Раньше токен был один на весь бот (data/token.json), поэтому ДЗ всех
+    # учеников попадали в календарь того, кто авторизовался первым.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS user_calendar_tokens (
+            user_id     INTEGER PRIMARY KEY,
+            token_json  TEXT    NOT NULL,
+            calendar_id TEXT    NOT NULL DEFAULT 'primary',
+            updated_at  TEXT    NOT NULL
+        )
+    """)
     # Миграции: добавляем колонки если таблицы уже существуют без них
     for migration in [
         "ALTER TABLE chat_homework ADD COLUMN due_date TEXT",
@@ -151,33 +162,6 @@ def update_hw_estimated_time(hw_id: int, minutes: int) -> None:
     conn.close()
 
 
-def get_groups_for_owner(owner_id: int) -> list[int]:
-    """Возвращает chat_id всех групп, где owner_id — владелец расписания."""
-    conn = get_connection()
-    cur = conn.execute(
-        "SELECT chat_id FROM chat_config WHERE schedule_owner_id=?",
-        (owner_id,),
-    )
-    rows = [r["chat_id"] for r in cur.fetchall()]
-    conn.close()
-    return rows
-
-
-def get_all_group_chat_ids() -> list[int]:
-    """
-    Возвращает все chat_id групп у которых есть хоть какие-то данные
-    (предметы или метрики нагрузки). Используется как фолбэк в личном чате.
-    """
-    conn = get_connection()
-    rows = conn.execute(
-        "SELECT DISTINCT chat_id FROM chat_subjects "
-        "UNION "
-        "SELECT DISTINCT tenant_id FROM daily_load_metrics"
-    ).fetchall()
-    conn.close()
-    return [r[0] for r in rows]
-
-
 def get_chat_homework(chat_id: int) -> list[dict]:
     conn = get_connection()
     cur = conn.execute(
@@ -251,6 +235,36 @@ def set_chat_schedule_owner(chat_id: int, owner_id: int):
     )
     conn.commit()
     conn.close()
+
+
+def get_schedule_for_chat(chat_id: int) -> list[dict]:
+    """
+    Расписание, действующее для конкретного чата — через его schedule_owner.
+    Пустой список, если владелец не назначен или у него нет расписания.
+    Намеренно без фолбэка «первое расписание в БД»: он выдавал бы одному
+    классу расписание другого.
+    """
+    owner_id = get_chat_schedule_owner(chat_id)
+    return get_schedule(owner_id) if owner_id else []
+
+
+def get_chats_for_user(user_id: int) -> list[int]:
+    """
+    Чаты, в которых пользователь состоит по данным бота: где он владелец
+    расписания либо где он отмечал выполнение ДЗ.
+    Нужен, чтобы понять, к какому классу относится пользователь WebApp.
+    """
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT chat_id FROM chat_config WHERE schedule_owner_id = ?"
+        " UNION "
+        "SELECT DISTINCT h.chat_id FROM chat_homework h"
+        " JOIN user_homework_status s ON s.homework_id = h.id"
+        " WHERE s.user_id = ?",
+        (user_id, user_id),
+    ).fetchall()
+    conn.close()
+    return [r[0] for r in rows]
 
 
 def get_chat_schedule_owner(chat_id: int) -> int | None:
@@ -426,3 +440,61 @@ def get_grade_targets(user_id: int) -> dict[str, int]:
     result = {r["subject"]: r["target"] for r in cur.fetchall()}
     conn.close()
     return result
+
+
+# ── Токены Google Calendar (на пользователя) ─────────────────────────────────
+
+def save_calendar_token(user_id: int, token_json: str, calendar_id: str = "primary") -> None:
+    """Сохраняет (или обновляет) OAuth-токен пользователя."""
+    conn = get_connection()
+    conn.execute(
+        "INSERT INTO user_calendar_tokens (user_id, token_json, calendar_id, updated_at)"
+        " VALUES (?,?,?,?)"
+        " ON CONFLICT(user_id) DO UPDATE SET"
+        "   token_json=excluded.token_json,"
+        "   calendar_id=excluded.calendar_id,"
+        "   updated_at=excluded.updated_at",
+        (user_id, token_json, calendar_id, datetime.now().isoformat()),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_calendar_token(user_id: int) -> str | None:
+    """Сырой JSON токена пользователя или None, если он не авторизован."""
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT token_json FROM user_calendar_tokens WHERE user_id = ?",
+        (user_id,),
+    ).fetchone()
+    conn.close()
+    return row["token_json"] if row else None
+
+
+def get_calendar_id(user_id: int) -> str:
+    """Календарь, в который пишет пользователь. По умолчанию — primary."""
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT calendar_id FROM user_calendar_tokens WHERE user_id = ?",
+        (user_id,),
+    ).fetchone()
+    conn.close()
+    return row["calendar_id"] if row and row["calendar_id"] else "primary"
+
+
+def has_calendar_token(user_id: int) -> bool:
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT 1 FROM user_calendar_tokens WHERE user_id = ? LIMIT 1",
+        (user_id,),
+    ).fetchone()
+    conn.close()
+    return row is not None
+
+
+def delete_calendar_token(user_id: int) -> None:
+    """Отвязывает Google Calendar от пользователя."""
+    conn = get_connection()
+    conn.execute("DELETE FROM user_calendar_tokens WHERE user_id = ?", (user_id,))
+    conn.commit()
+    conn.close()

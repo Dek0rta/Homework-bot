@@ -13,8 +13,6 @@ services:
         sync: false
       - key: ADMIN_USER_ID
         sync: false
-      - key: CALENDAR_ID
-        value: primary
       - key: TIMEZONE
         value: Europe/Moscow
       - key: WEB_APP_URL
@@ -24,7 +22,7 @@ services:
       - key: GOOGLE_CREDENTIALS_JSON
         sync: false
       - key: GOOGLE_TOKEN_JSON
-        sync: false
+        sync: false        # только для переноса старого общего токена
     disk:
       name: bot-data
       mountPath: /data     # config.py автоматически найдёт /data

@@ -357,11 +357,15 @@ async def btn_my_schedule(message: Message):
 @router.message(F.text == BTN_CALENDAR)
 async def btn_calendar(message: Message, state: FSMContext):
     await safe_delete(message)
-    if calendar_api.get_credentials() is not None:
-        await message.answer("Google Calendar уже подключён!", reply_markup=MAIN_KB)
+    if calendar_api.is_connected(message.from_user.id):
+        await message.answer(
+            "Google Calendar уже подключён к твоему аккаунту.\n"
+            "Отвязать — /disconnect_calendar",
+            reply_markup=MAIN_KB,
+        )
         return
 
-    if not os.path.exists(calendar_api.CREDENTIALS_PATH):
+    if not calendar_api.credentials_file_exists():
         await message.answer(
             "Файл <code>data/credentials.json</code> не найден.\n\n"
             "Как получить:\n"
@@ -382,9 +386,25 @@ async def btn_calendar(message: Message, state: FSMContext):
     await message.answer(
         "1. Перейди по ссылке и разреши доступ:\n"
         f"<code>{auth_url}</code>\n\n"
-        "2. Скопируй полученный код и отправь его сюда.",
+        "2. Скопируй полученный код и отправь его сюда.\n\n"
+        "<i>ДЗ будут добавляться в твой личный календарь.</i>",
         parse_mode="HTML",
         reply_markup=ReplyKeyboardRemove(),
+    )
+
+
+@router.message(Command("disconnect_calendar"), F.chat.type == "private")
+async def cmd_disconnect_calendar(message: Message):
+    await safe_delete(message)
+    if not calendar_api.is_connected(message.from_user.id):
+        await message.answer("Google Calendar и так не подключён.", reply_markup=MAIN_KB)
+        return
+
+    calendar_api.disconnect(message.from_user.id)
+    await message.answer(
+        "✅ Google Calendar отвязан.\n"
+        "Уже созданные события останутся в календаре — удали их вручную, если нужно.",
+        reply_markup=MAIN_KB,
     )
 
 
@@ -400,9 +420,12 @@ async def handle_auth_code(message: Message, state: FSMContext):
         return
 
     try:
-        calendar_api.exchange_code(flow, message.text.strip())
+        calendar_api.exchange_code(message.from_user.id, flow, message.text.strip())
         await state.clear()
-        await message.answer("Google Calendar подключён! Теперь можешь отправлять ДЗ.", reply_markup=MAIN_KB)
+        await message.answer(
+            "Google Calendar подключён! Теперь можешь отправлять ДЗ.",
+            reply_markup=MAIN_KB,
+        )
     except Exception as e:
         logger.exception("Auth error")
         await message.answer(f"Ошибка авторизации: {e}\n\nПопробуй снова.", reply_markup=MAIN_KB)
@@ -417,8 +440,8 @@ def _find_subject_days(subject: str, schedule: list[dict]) -> list[dict]:
     return [e for e in schedule if e["subject"].strip().lower() == s]
 
 
-async def _do_add_to_calendar(status: Message, parsed: dict):
-    """Добавляет ДЗ в Calendar и редактирует статусное сообщение."""
+async def _do_add_to_calendar(status: Message, parsed: dict, user_id: int):
+    """Добавляет ДЗ в календарь пользователя и редактирует статусное сообщение."""
     subject  = parsed.get("subject", "Неизвестно")
     task     = parsed.get("task", "")
     day      = parsed.get("due_lesson_day")
@@ -440,13 +463,14 @@ async def _do_add_to_calendar(status: Message, parsed: dict):
         lesson_dt = sched_module.next_lesson_datetime(day, time_str)
 
     try:
-        event_link = await calendar_api.add_homework_event(subject, task, lesson_dt)
+        event_link = await calendar_api.add_homework_event(user_id, subject, task, lesson_dt)
     except RuntimeError as e:
         if "not_authorized" in str(e):
             await status.edit_text(
                 f"Предмет: <b>{subject}</b>\n"
                 f"Задание: {task}\n\n"
-                "Google Calendar не подключён. Нажми 🔗 Google Calendar.",
+                "Google Calendar не подключён к твоему аккаунту.\n"
+                "Нажми 🔗 Google Calendar или выполни /auth.",
                 parse_mode="HTML",
             )
         else:
@@ -479,7 +503,13 @@ async def cb_main_menu(call: CallbackQuery):
     await call.bot.send_message(call.message.chat.id, "Главное меню", reply_markup=MAIN_KB)
 
 
-async def _apply_parsed(status: Message, parsed: dict, state: FSMContext, schedule: list[dict]):
+async def _apply_parsed(
+    status: Message,
+    parsed: dict,
+    state: FSMContext,
+    schedule: list[dict],
+    user_id: int,
+):
     """Сверяет предмет с расписанием и либо добавляет ДЗ, либо просит уточнить день."""
     subject  = parsed.get("subject", "Неизвестно")
     task     = parsed.get("task", "")
@@ -508,7 +538,7 @@ async def _apply_parsed(status: Message, parsed: dict, state: FSMContext, schedu
     # Ровно одно совпадение — день/время берём из расписания, а не из ответа LLM
     parsed["due_lesson_day"]  = matching[0]["day_of_week"]
     parsed["due_lesson_time"] = matching[0]["start_time"]
-    await _do_add_to_calendar(status, parsed)
+    await _do_add_to_calendar(status, parsed, user_id)
 
 
 @router.callback_query(HomeworkConfirm.choosing_day, F.data.startswith("hw|pick|"))
@@ -530,7 +560,7 @@ async def cb_pick_hw_day(call: CallbackQuery, state: FSMContext):
     await state.clear()
     await safe_delete(call.message)
     status = await call.bot.send_message(call.message.chat.id, "Добавляю в Calendar...")
-    await _do_add_to_calendar(status, parsed)
+    await _do_add_to_calendar(status, parsed, call.from_user.id)
 
 
 async def process_homework(message: Message, text: str, state: FSMContext):
@@ -553,7 +583,7 @@ async def process_homework(message: Message, text: str, state: FSMContext):
         await status.edit_text(f"Ошибка при анализе текста: {e}")
         return
 
-    await _apply_parsed(status, parsed, state, schedule)
+    await _apply_parsed(status, parsed, state, schedule, message.from_user.id)
 
 
 @router.message(F.chat.type == "private", F.photo)
@@ -585,7 +615,7 @@ async def handle_photo(message: Message, state: FSMContext):
             await status.edit_text(f"Ошибка при анализе фото: {e}")
             return
 
-        await _apply_parsed(status, parsed, state, schedule)
+        await _apply_parsed(status, parsed, state, schedule, message.from_user.id)
     finally:
         os.unlink(tmp_path)
 
@@ -604,15 +634,17 @@ async def handle_text(message: Message, state: FSMContext):
 async def cmd_stats_private(message: Message):
     await safe_delete(message)
 
-    # Сначала группы, где пользователь — владелец расписания;
-    # иначе любая группа с данными (для обычных учеников класса)
-    group_ids = db.get_groups_for_owner(message.from_user.id) or db.get_all_group_chat_ids()
+    # Только чаты, к которым причастен сам пользователь. Раньше был фолбэк
+    # «любая группа с данными» — ученик одного класса видел график другого.
+    group_ids = db.get_chats_for_user(message.from_user.id)
 
     if not group_ids:
         await message.answer(
             "📊 <b>Нагрузка класса</b>\n\n"
-            "Данных пока нет — бот ещё не добавлен в классный чат.\n\n"
-            "Попроси администратора добавить бота в беседу и выполнить /setup_subjects.",
+            "Не вижу, к какому классу ты относишься.\n\n"
+            "Бот должен быть добавлен в чат класса, а там выполнено "
+            "/setup_subjects. Если чат уже настроен — отметь любое задание "
+            "выполненным в приложении, и график станет доступен.",
             parse_mode="HTML",
             reply_markup=MAIN_KB,
         )

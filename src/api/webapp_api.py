@@ -88,6 +88,32 @@ def _authed(handler):
     return wrapper
 
 
+# ── Определение класса пользователя ───────────────────────────────────────────
+
+def _default_chat_id() -> int:
+    """Чат класса из окружения. 0 — не задан (мультиклассовый режим)."""
+    return int(os.getenv("WEBAPP_CHAT_ID", 0) or 0)
+
+
+def _chats_for(user_id: int) -> list[int]:
+    """
+    Чаты, к которым относится пользователь, в порядке приоритета.
+    WEBAPP_CHAT_ID остаётся как явное указание для установки на один класс,
+    но больше не является единственным источником.
+    """
+    chats: list[int] = []
+
+    explicit = _default_chat_id()
+    if explicit:
+        chats.append(explicit)
+
+    for chat_id in db.get_chats_for_user(user_id):
+        if chat_id not in chats:
+            chats.append(chat_id)
+
+    return chats
+
+
 # ── Нормализация дат ──────────────────────────────────────────────────────────
 
 def _norm_deadline(due_date: str | None) -> str:
@@ -148,12 +174,24 @@ def _row_to_hw(row: Any) -> dict:
 # ── Домашние задания ──────────────────────────────────────────────────────────
 
 @_authed
-async def handle_get_homework(_request: web.Request, _user_id: int) -> web.Response:
+async def handle_get_homework(_request: web.Request, user_id: int) -> web.Response:
+    """
+    ДЗ класса пользователя. Раньше отдавались все записи таблицы,
+    то есть задания всех классов сразу.
+
+    chat_id=0 — задания, добавленные через WebApp без привязки к группе;
+    они видны всем, так как принадлежность определить нельзя.
+    """
+    chat_ids = _chats_for(user_id) + [0]
+    placeholders = ",".join("?" * len(chat_ids))
+
     conn = db.get_connection()
     try:
         rows = conn.execute(
             "SELECT id, subject, task, added_at, due_date, photos_json, ai_confidence "
-            "FROM chat_homework ORDER BY id DESC LIMIT 200"
+            f"FROM chat_homework WHERE chat_id IN ({placeholders}) "
+            "ORDER BY id DESC LIMIT 200",
+            chat_ids,
         ).fetchall()
     finally:
         conn.close()
@@ -171,7 +209,9 @@ async def handle_post_homework(request: web.Request, user_id: int) -> web.Respon
     if not subject or not description:
         return _json({"error": "subject and description required"}, status=400)
 
-    chat_id = int(os.getenv("WEBAPP_CHAT_ID", 0) or 0)
+    # Привязываем к классу автора; 0 — если класс определить не удалось
+    chats   = _chats_for(user_id)
+    chat_id = chats[0] if chats else 0
     hw_id   = db.save_chat_homework(chat_id, subject, description, deadline or None)
 
     # Фото сохраняются отдельным update — save_chat_homework их не принимает
@@ -260,30 +300,22 @@ async def handle_post_status(request: web.Request, user_id: int) -> web.Response
 # ── Расписание ────────────────────────────────────────────────────────────────
 
 @_authed
-async def handle_get_schedule(_request: web.Request, _user_id: int) -> web.Response:
+async def handle_get_schedule(_request: web.Request, user_id: int) -> web.Response:
     """
-    Расписание класса. Первый непустой источник побеждает:
-      1. расписание владельца WEBAPP_CHAT_ID
-      2. первое расписание в БД (бот обслуживает один класс)
-    """
-    entries = None
+    Расписание, действующее для пользователя. Первый непустой источник:
+      1. личное расписание пользователя
+      2. расписание его класса (через chat_config.schedule_owner)
 
-    chat_id = int(os.getenv("WEBAPP_CHAT_ID", 0) or 0)
-    if chat_id:
-        owner_id = db.get_chat_schedule_owner(chat_id)
-        if owner_id:
-            entries = db.get_schedule(owner_id) or None
+    Фолбэка «первое расписание в БД» здесь намеренно нет: он выдавал бы
+    ученику одного класса расписание другого.
+    """
+    entries = db.get_schedule(user_id)
 
     if not entries:
-        conn = db.get_connection()
-        try:
-            row = conn.execute(
-                "SELECT DISTINCT user_id FROM schedule ORDER BY user_id LIMIT 1"
-            ).fetchone()
-        finally:
-            conn.close()
-        if row:
-            entries = db.get_schedule(row["user_id"]) or None
+        for chat_id in _chats_for(user_id):
+            entries = db.get_schedule_for_chat(chat_id)
+            if entries:
+                break
 
     if not entries:
         return _json([])
