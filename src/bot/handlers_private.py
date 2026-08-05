@@ -24,6 +24,7 @@ from aiogram.types import (
     ReplyKeyboardRemove,
 )
 
+from src.bot import onboarding
 from src.bot.backup import make_backup_json, save_backup
 from src.bot.keyboards import (
     MAIN_KB,
@@ -68,11 +69,12 @@ async def cmd_start(message: Message):
         f"Привет, <b>{message.from_user.first_name}</b>! "
         "Я добавляю домашние задания прямо в Google Calendar.\n\n"
         "<b>Быстрый старт:</b>\n"
-        "1. <b>✏️ Изменить расписание</b> — укажи уроки по дням\n"
+        "1. <b>📸 Пришли фото расписания</b> — распознаю сам\n"
         "2. <b>🔗 Google Calendar</b> — подключи аккаунт\n"
         "3. Отправь фото тетради или текст с ДЗ — готово!\n\n"
         "<b>Команды:</b>\n"
-        "/schedule — редактор расписания\n"
+        "/setup — расписание по фото\n"
+        "/schedule — вписать расписание вручную\n"
         "/my_schedule — посмотреть расписание\n"
         "/auth — подключить Google Calendar\n"
         "/stats — график нагрузки класса",
@@ -176,10 +178,28 @@ async def open_schedule_editor(message: Message, state: FSMContext):
     await message.answer("📆 Расписание:", reply_markup=kb_days(temp))
 
 
-@router.message(Command("schedule"))
-@router.message(F.text == BTN_SET_SCHEDULE)
+@router.message(F.text == BTN_SET_SCHEDULE, F.chat.type == "private")
 async def btn_set_schedule(message: Message, state: FSMContext):
+    """
+    Кнопка расписания предлагает фото первым: ручной ввод — это до сотни
+    нажатий, и большинство до конца не доходит.
+    """
     await safe_delete(message)
+    onboarding.start_awaiting(message.chat.id, message.from_user.id)
+    await message.answer(
+        "📸 <b>Пришли фото расписания</b>\n\n"
+        "Из дневника, со стены или скриншотом — распознаю сам.\n"
+        "Можно и текстом.\n\n"
+        "<i>Вписать по клеткам вручную — /schedule</i>",
+        parse_mode="HTML",
+    )
+
+
+@router.message(Command("schedule"), F.chat.type == "private")
+async def cmd_schedule_manual(message: Message, state: FSMContext):
+    """Ручной редактор по клеткам — запасной путь, если фото не читается."""
+    await safe_delete(message)
+    onboarding.stop_awaiting(message.chat.id)
     try:
         await open_schedule_editor(message, state)
     except Exception as e:
@@ -568,7 +588,9 @@ async def process_homework(message: Message, text: str, state: FSMContext):
 
     if not db.has_schedule(message.from_user.id):
         await message.answer(
-            "Сначала настрой расписание — нажми ✏️ Изменить расписание.",
+            "Сначала нужно расписание.\n\n"
+            "📸 Пришли его фото — распознаю сам: /setup\n"
+            "✏️ Или впиши вручную: /schedule",
             reply_markup=MAIN_KB,
         )
         return
@@ -588,11 +610,17 @@ async def process_homework(message: Message, text: str, state: FSMContext):
 
 @router.message(F.chat.type == "private", F.photo)
 async def handle_photo(message: Message, state: FSMContext):
+    # Идёт настройка — фото это расписание, а не домашнее задание
+    if await onboarding.try_parse_schedule_photo(message):
+        return
+
     await safe_delete(message)
 
     if not db.has_schedule(message.from_user.id):
         await message.answer(
-            "Сначала настрой расписание — нажми ✏️ Изменить расписание.",
+            "Сначала нужно расписание.\n\n"
+            "📸 Пришли его фото — распознаю сам: /setup\n"
+            "✏️ Или впиши вручную: /schedule",
             reply_markup=MAIN_KB,
         )
         return
@@ -624,6 +652,11 @@ async def handle_photo(message: Message, state: FSMContext):
 async def handle_text(message: Message, state: FSMContext):
     if await state.get_state() is not None:
         return
+
+    # Идёт настройка — длинный текст это расписание, а не домашнее задание
+    if await onboarding.try_parse_schedule_text(message):
+        return
+
     await process_homework(message, message.text, state)
 
 

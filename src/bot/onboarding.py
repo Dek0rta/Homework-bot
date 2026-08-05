@@ -29,7 +29,7 @@ from aiogram.types import (
 
 from src.bot.utils import is_chat_admin
 from src.core import db
-from src.core.constants import DAYS_RU, GROUP_TYPES
+from src.core.constants import DAYS_RU, GROUP_TYPES, LESSON_TIMES
 from src.services import llm
 
 logger = logging.getLogger(__name__)
@@ -134,6 +134,23 @@ async def cmd_setup(message: Message):
     )
 
 
+@router.message(Command("setup"), F.chat.type == "private")
+async def cmd_setup_private(message: Message):
+    """
+    Тот же путь по фото в личном чате. Раньше здесь был только ручной
+    редактор по клеткам — под сотню нажатий, ради ухода от которых
+    распознавание и делалось.
+    """
+    start_awaiting(message.chat.id, message.from_user.id)
+    await message.answer(
+        "📸 <b>Пришли фото своего расписания</b>\n\n"
+        "Из дневника, со стены или скриншотом — распознаю сам.\n"
+        "Можно и текстом.\n\n"
+        "<i>Вписать вручную — /schedule</i>",
+        parse_mode="HTML",
+    )
+
+
 # ── Приём расписания ─────────────────────────────────────────────────────────
 
 async def try_parse_schedule_photo(message: Message) -> bool:
@@ -221,28 +238,60 @@ async def cb_save_schedule(call: CallbackQuery):
         return
 
     await call.answer()
-
-    count = db.save_class_schedule(chat_id, lessons)
-    db.log_event("schedule_saved", chat_id=chat_id, user_id=call.from_user.id,
-                 payload={"lessons": count})
-
-    # Предметы для детекции ДЗ выводим из расписания — отдельная настройка не нужна
-    subjects = db.get_class_subjects(chat_id)
-    if subjects:
-        db.set_chat_subjects(chat_id, subjects)
-
     stop_awaiting(chat_id)
+
+    is_private = call.message.chat.type == "private"
+
+    if is_private:
+        # В личке расписание принадлежит пользователю: время урока выводим
+        # из номера, чтобы формат совпал с личной таблицей schedule.
+        entries = [
+            {
+                "day":        l["day"],
+                "subject":    l["subject"],
+                "start_time": LESSON_TIMES[l["slot"] - 1] if 1 <= l["slot"] <= len(LESSON_TIMES) else "",
+            }
+            for l in lessons
+        ]
+        db.save_schedule(call.from_user.id, entries)
+        count    = len(entries)
+        subjects = sorted({l["subject"] for l in lessons})
+    else:
+        count = db.save_class_schedule(chat_id, lessons)
+        # Предметы для детекции ДЗ выводим из расписания — отдельная настройка не нужна
+        subjects = db.get_class_subjects(chat_id)
+        if subjects:
+            db.set_chat_subjects(chat_id, subjects)
+
+    db.log_event("schedule_saved", chat_id=chat_id, user_id=call.from_user.id,
+                 payload={"lessons": count, "private": is_private})
+
+    subject_line = (
+        f"Предметы: {', '.join(subjects[:8])}" + ("…" if len(subjects) > 8 else "")
+        if subjects else ""
+    )
+
+    if is_private:
+        tail = (
+            "Теперь отправь фото или текст с домашним заданием — "
+            "добавлю его в Google Calendar.\n\n"
+            "📅 /my_schedule — посмотреть расписание\n"
+            "✏️ /schedule — поправить вручную\n"
+            "🔗 /auth — подключить календарь"
+        )
+    else:
+        tail = (
+            "Теперь просто пишите домашние задания в чат — я замечу их сам "
+            "и соберу в список.\n\n"
+            "📋 /hw — список заданий\n"
+            "📅 /schedule — посмотреть расписание\n"
+            "📊 /stats — нагрузка класса"
+        )
 
     await call.message.edit_text(
         f"✅ <b>Готово!</b> Расписание сохранено — {count} урок(ов).\n\n"
-        f"Предметы подхватил из расписания: {', '.join(subjects[:8])}"
-        + ("…" if len(subjects) > 8 else "")
-        + "\n\n"
-        "Теперь просто пишите домашние задания в чат — я замечу их сам "
-        "и соберу в список.\n\n"
-        "📋 /hw — список заданий\n"
-        "📅 /schedule — посмотреть расписание\n"
-        "📊 /stats — нагрузка класса",
+        + (subject_line + "\n\n" if subject_line else "")
+        + tail,
         parse_mode="HTML",
     )
 
