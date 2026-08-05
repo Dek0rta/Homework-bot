@@ -141,7 +141,11 @@ export async function deleteHomework(id: string): Promise<void> {
     if (idx !== -1) MOCK_HOMEWORK.splice(idx, 1);
     return;
   }
-  await fetch(`${API_URL}/api/homework/${id}`, { method: 'DELETE', headers: authHeaders() });
+  const res = await fetch(`${API_URL}/api/homework/${id}`, {
+    method:  'DELETE',
+    headers: authHeaders(),
+  });
+  assertOk(res, 'deleteHomework');
 }
 
 // ── Per-user status ───────────────────────────────────────────────────────────
@@ -157,7 +161,7 @@ export async function fetchUserStatuses(
     } catch { return {}; }
   }
   const res = await fetch(`${API_URL}/api/status`, { headers: authHeaders() });
-  if (!res.ok) return {};
+  assertOk(res, 'fetchUserStatuses');
   return res.json();
 }
 
@@ -176,11 +180,12 @@ export async function setHomeworkStatus(
     } catch { /* ignore */ }
     return;
   }
-  await fetch(`${API_URL}/api/status`, {
+  const res = await fetch(`${API_URL}/api/status`, {
     method:  'POST',
     headers: jsonHeaders(),
     body:    JSON.stringify({ userId, homeworkId, isDone }),
   });
+  assertOk(res, 'setHomeworkStatus');
 }
 
 // ── Grades ────────────────────────────────────────────────────────────────────
@@ -197,7 +202,7 @@ export async function fetchGrades(userId: number): Promise<Grade[]> {
     } catch { return []; }
   }
   const res = await fetch(`${API_URL}/api/grades`, { headers: authHeaders() });
-  if (!res.ok) return [];
+  assertOk(res, 'fetchGrades');
   return res.json();
 }
 
@@ -246,7 +251,11 @@ export async function deleteGrade(userId: number, gradeId: string): Promise<void
     } catch { /* ignore */ }
     return;
   }
-  await fetch(`${API_URL}/api/grades/${gradeId}`, { method: 'DELETE', headers: authHeaders() });
+  const res = await fetch(`${API_URL}/api/grades/${gradeId}`, {
+    method:  'DELETE',
+    headers: authHeaders(),
+  });
+  assertOk(res, 'deleteGrade');
 }
 
 export async function fetchGradeTargets(userId: number): Promise<Record<string, number>> {
@@ -258,7 +267,7 @@ export async function fetchGradeTargets(userId: number): Promise<Record<string, 
     } catch { return {}; }
   }
   const res = await fetch(`${API_URL}/api/grade-targets`, { headers: authHeaders() });
-  if (!res.ok) return {};
+  assertOk(res, 'fetchGradeTargets');
   return res.json();
 }
 
@@ -277,11 +286,12 @@ export async function setGradeTarget(
     } catch { /* ignore */ }
     return;
   }
-  await fetch(`${API_URL}/api/grade-targets`, {
+  const res = await fetch(`${API_URL}/api/grade-targets`, {
     method:  'POST',
     headers: jsonHeaders(),
     body:    JSON.stringify({ userId, subject, target }),
   });
+  assertOk(res, 'setGradeTarget');
 }
 
 // ── Schedule ─────────────────────────────────────────────────────────────────
@@ -291,13 +301,9 @@ export async function fetchSchedule(): Promise<ScheduleLesson[]> {
     await sleep(200);
     return [...MOCK_SCHEDULE];
   }
-  try {
-    const res = await fetch(`${API_URL}/api/schedule`, { headers: authHeaders() });
-    if (!res.ok) return [];
-    const data: ScheduleLesson[] = await res.json();
-    // Fall back to mock if server returned empty array
-    return data.length > 0 ? data : [...MOCK_SCHEDULE];
-  } catch {
-    return [...MOCK_SCHEDULE];
-  }
+  // Никакого fallback на MOCK_SCHEDULE: пустое расписание и упавший бэкенд —
+  // это разные состояния, и показывать вместо них выдуманные уроки нельзя.
+  const res = await fetch(`${API_URL}/api/schedule`, { headers: authHeaders() });
+  assertOk(res, 'fetchSchedule');
+  return res.json();
 }

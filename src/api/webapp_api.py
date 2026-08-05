@@ -199,8 +199,12 @@ def _norm_created_at(added_at: str | None) -> str:
                 date.today().year, int(m.group(2)), int(m.group(1)),
                 int(m.group(3)), int(m.group(4)),
             ).isoformat()
-        except ValueError:
-            pass
+        except ValueError as e:
+            # Дата вида «31.02 10:00». Показать текущее время — меньшее зло,
+            # чем уронить весь список, но молчать об этом нельзя.
+            logger.warning("Некорректная дата создания ДЗ %r: %s", added_at, e)
+    else:
+        logger.warning("Неизвестный формат даты создания ДЗ: %r", added_at)
     return datetime.now().isoformat()
 
 
@@ -210,12 +214,19 @@ def _row_to_hw(row: Any) -> dict:
         raw = row["photos_json"]
         if raw:
             photos = json.loads(raw)
-    except Exception:
-        pass
+    except (TypeError, ValueError, json.JSONDecodeError) as e:
+        # Битый JSON: фото не показать, но и терять запись целиком не нужно.
+        logger.warning("Повреждённый photos_json у ДЗ id=%s: %s", row["id"], e)
+    except (IndexError, KeyError):
+        photos = []  # старая схема без колонки
     try:
         confidence = row["ai_confidence"]
-    except Exception:
-        confidence = None
+    except (IndexError, KeyError):
+        confidence = None  # старая схема без колонки
+    try:
+        created_by = row["created_by"] or 0
+    except (IndexError, KeyError):
+        created_by = 0  # ДЗ создано до появления колонки — автор неизвестен
     return {
         "id":           str(row["id"]),
         "subject":      row["subject"],
@@ -223,7 +234,7 @@ def _row_to_hw(row: Any) -> dict:
         "deadline":     _norm_deadline(row["due_date"]),
         "photos":       photos,
         "createdAt":    _norm_created_at(row["added_at"]),
-        "createdBy":    0,
+        "createdBy":    created_by,
         "aiConfidence": confidence,
     }
 
@@ -245,7 +256,7 @@ async def handle_get_homework(_request: web.Request, user_id: int) -> web.Respon
     conn = db.get_connection()
     try:
         rows = conn.execute(
-            "SELECT id, subject, task, added_at, due_date, photos_json, ai_confidence "
+            "SELECT id, subject, task, added_at, due_date, photos_json, ai_confidence, created_by "
             f"FROM chat_homework WHERE chat_id IN ({placeholders}) "
             "ORDER BY id DESC LIMIT 200",
             chat_ids,
@@ -269,7 +280,9 @@ async def handle_post_homework(request: web.Request, user_id: int) -> web.Respon
     # Привязываем к классу автора; 0 — если класс определить не удалось
     chats   = _chats_for(user_id)
     chat_id = chats[0] if chats else 0
-    hw_id   = db.save_chat_homework(chat_id, subject, description, deadline or None)
+    hw_id   = db.save_chat_homework(
+        chat_id, subject, description, deadline or None, created_by=user_id,
+    )
 
     # Фото сохраняются отдельным update — save_chat_homework их не принимает
     if photos:

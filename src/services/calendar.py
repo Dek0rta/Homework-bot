@@ -15,6 +15,7 @@ import logging
 import os
 from datetime import datetime, timedelta
 
+from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -53,11 +54,13 @@ def migrate_legacy_token(owner_user_id: int | None) -> bool:
         return False
 
     db.save_calendar_token(owner_user_id, token_json)
+    logger.info("Legacy token.json перенесён в БД для user_id=%s", owner_user_id)
     try:
         os.remove(TOKEN_PATH)
-    except OSError:
-        pass
-    logger.info("Legacy token.json перенесён в БД для user_id=%s", owner_user_id)
+    except OSError as e:
+        # Перенос состоялся, но файл остался на диске: он выглядит как «общий»
+        # токен и может сбить с толку при следующем старте.
+        logger.warning("Не удалось удалить %s после переноса: %s", TOKEN_PATH, e)
     return True
 
 
@@ -82,10 +85,18 @@ def get_credentials(user_id: int) -> Credentials | None:
     if creds.expired and creds.refresh_token:
         try:
             creds.refresh(Request())
-        except Exception:
+        except RefreshError:
             # Доступ отозван в Google-аккаунте — токен больше не пригоден
-            logger.info("Не удалось обновить токен user_id=%s — удаляю", user_id)
+            logger.info("Google отозвал доступ user_id=%s — удаляю токен", user_id)
             db.delete_calendar_token(user_id)
+            return None
+        except Exception as e:
+            # Сеть, таймаут, 5xx у Google. Токен исправен — удалять его нельзя,
+            # иначе разовый сбой сети разлогинивает пользователя навсегда.
+            logger.warning(
+                "Временная ошибка обновления токена user_id=%s: %s — токен сохранён",
+                user_id, e,
+            )
             return None
         db.save_calendar_token(user_id, creds.to_json(), db.get_calendar_id(user_id))
         return creds

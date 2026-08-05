@@ -3,19 +3,23 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import datetime
 
+from aiogram.exceptions import TelegramAPIError
 from aiogram.types import Message
 
 from src.core.constants import DAYS_RU, MONTHS_SHORT
 
+logger = logging.getLogger(__name__)
+
 
 async def safe_delete(message: Message) -> None:
-    """Удаляет сообщение, молча игнорируя отсутствие прав или устаревший id."""
+    """Удаляет сообщение, игнорируя отсутствие прав или устаревший id."""
     try:
         await message.delete()
-    except Exception:
-        pass
+    except TelegramAPIError as e:
+        logger.debug("Не удалось удалить сообщение %s: %s", message.message_id, e)
 
 
 async def delete_after(message: Message, delay: int = 10) -> None:

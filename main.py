@@ -44,6 +44,7 @@ PRIVATE_COMMANDS = [
     BotCommand(command="schedule",    description="Изменить расписание"),
     BotCommand(command="my_schedule", description="Посмотреть расписание"),
     BotCommand(command="reminders",   description="Напоминания о домашке"),
+    BotCommand(command="reminders_off", description="Отключить напоминания"),
     BotCommand(command="stats",       description="График нагрузки класса"),
     BotCommand(command="backup",      description="Резервная копия расписания"),
     BotCommand(command="auth",        description="Подключить Google Calendar"),

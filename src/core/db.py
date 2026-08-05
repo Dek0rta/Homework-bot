@@ -1,9 +1,12 @@
 from __future__ import annotations
+import logging
 import sqlite3
 import os
 from datetime import datetime, timedelta
 
 from src.core.config import DB_PATH
+
+logger = logging.getLogger(__name__)
 
 
 def get_connection() -> sqlite3.Connection:
@@ -210,11 +213,16 @@ def init_db():
         "ALTER TABLE class_schedule ADD COLUMN week_parity TEXT NOT NULL DEFAULT ''",
         # ДЗ может относиться только к одной подгруппе
         "ALTER TABLE chat_homework ADD COLUMN subgroup INTEGER NOT NULL DEFAULT 0",
+        # Автор задания: 0 — добавлено ботом из чата либо до появления колонки
+        "ALTER TABLE chat_homework ADD COLUMN created_by INTEGER NOT NULL DEFAULT 0",
     ]:
         try:
             conn.execute(migration)
-        except Exception:
-            pass
+        except sqlite3.OperationalError as e:
+            # Колонка уже существует — обычный случай на непустой БД.
+            # Всё остальное (нет таблицы, битый SQL) скрывать нельзя.
+            if "duplicate column name" not in str(e).lower():
+                logger.warning("Миграция не применена (%s): %s", migration, e)
     conn.commit()
     conn.close()
 
@@ -259,13 +267,21 @@ def save_chat_homework(
     task: str,
     due_date: str | None = None,
     ai_confidence: float | None = None,
+    created_by: int = 0,
 ) -> int:
-    """Сохраняет ДЗ и возвращает id новой записи."""
+    """
+    Сохраняет ДЗ и возвращает id новой записи.
+
+    created_by — автор задания; 0, если ДЗ распознано ботом из сообщения чата
+    и конкретного автора у него нет.
+    """
     conn = get_connection()
     cur = conn.execute(
-        "INSERT INTO chat_homework (chat_id, subject, task, added_at, due_date, ai_confidence)"
-        " VALUES (?, ?, ?, ?, ?, ?)",
-        (chat_id, subject, task, datetime.now().strftime("%d.%m %H:%M"), due_date, ai_confidence),
+        "INSERT INTO chat_homework"
+        " (chat_id, subject, task, added_at, due_date, ai_confidence, created_by)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (chat_id, subject, task, datetime.now().strftime("%d.%m %H:%M"),
+         due_date, ai_confidence, created_by),
     )
     hw_id = cur.lastrowid
     conn.commit()

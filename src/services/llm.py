@@ -99,23 +99,49 @@ def _extract_json(raw: str) -> dict:
     return json.loads(match.group())
 
 
+# Ответ модели ждём не дольше этого: зависший запрос иначе держит хендлер
+# бессрочно, и пользователь не получает ни ответа, ни ошибки.
+_REQUEST_TIMEOUT_SECONDS = 60
+
+
+def _is_retriable(exc: Exception) -> bool:
+    """
+    Стоит ли повторить запрос. Помимо 429 повторяем таймауты, обрывы связи и
+    5xx — раньше они падали с первой попытки, хотя это временные сбои.
+    """
+    if isinstance(exc, (asyncio.TimeoutError, ConnectionError, OSError)):
+        return True
+    status = getattr(exc, "status_code", None)
+    if isinstance(status, int):
+        return status == 429 or 500 <= status < 600
+    text = str(exc)
+    return any(marker in text for marker in ("429", "500", "502", "503", "504", "timeout", "Timeout"))
+
+
 async def _chat(messages: list[dict], model: str, max_retries: int = 4) -> str:
-    """Отправляет запрос к Mistral с повтором при ошибке 429."""
+    """Запрос к Mistral с таймаутом и повтором при временных сбоях."""
     for attempt in range(max_retries):
         try:
-            response = await _client.chat.complete_async(
-                model=model,
-                messages=messages,
-                temperature=0.1,
+            response = await asyncio.wait_for(
+                _client.chat.complete_async(
+                    model=model,
+                    messages=messages,
+                    temperature=0.1,
+                ),
+                timeout=_REQUEST_TIMEOUT_SECONDS,
             )
             return response.choices[0].message.content.strip()
         except Exception as e:
-            if "429" in str(e) and attempt < max_retries - 1:
+            if _is_retriable(e) and attempt < max_retries - 1:
                 wait = 2 ** attempt
-                logger.warning("Mistral 429, повтор через %ds (попытка %d)", wait, attempt + 1)
+                logger.warning(
+                    "Mistral: временный сбой (%s), повтор через %ds (попытка %d)",
+                    type(e).__name__, wait, attempt + 1,
+                )
                 await asyncio.sleep(wait)
             else:
                 raise
+    raise RuntimeError("unreachable: цикл повторов завершился без ответа и без исключения")
 
 
 async def ask_text(prompt: str) -> str:
@@ -454,6 +480,9 @@ def _parse_group_result(raw: str) -> dict | None:
         if str(data.get("due_date", "")).lower() == "null": data["due_date"] = None
         return data
     except Exception:
+        # Модель вернула не-JSON. Для вызывающего это неотличимо от «не ДЗ»,
+        # поэтому пишем в лог — иначе сбой парсинга не найти.
+        logger.warning("Не удалось разобрать ответ модели: %s", raw[:200])
         return None
 
 

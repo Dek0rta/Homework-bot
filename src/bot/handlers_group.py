@@ -12,6 +12,7 @@ import tempfile
 from datetime import date, datetime, timedelta
 
 from aiogram import F, Router
+from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Command
 from aiogram.types import (
     BufferedInputFile,
@@ -106,8 +107,9 @@ async def _try_handle_override(message: Message, text: str, subjects: list[str])
                  payload={"cancelled": cancelled})
     try:
         await message.react([ReactionTypeEmoji(emoji="✍️")])
-    except Exception:
-        pass
+    except TelegramAPIError as e:
+        # Реакции могут быть запрещены настройками чата — не повод падать
+        logger.debug("Не удалось поставить реакцию ✍️: %s", e)
 
     date_label = fmt_due_date(day.isoformat())
     if cancelled:
@@ -183,8 +185,8 @@ async def _handle_group_message(message: Message, text: str | None = None, image
     # Реакция 👀 — сигнал, что бот увидел ДЗ
     try:
         await message.react([ReactionTypeEmoji(emoji="👀")])
-    except Exception:
-        pass
+    except TelegramAPIError as e:
+        logger.debug("Не удалось поставить реакцию 👀: %s", e)
 
     # Ищем уроки с этим предметом в расписании класса
     sched_entries = [
