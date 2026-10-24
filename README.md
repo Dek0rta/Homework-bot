@@ -59,7 +59,7 @@ Telegram-бот для школьника и класса: присылаешь 
 |---|---|
 | Бот | `aiogram 3.x` (long polling) |
 | Разбор ДЗ | GigaChat 2 (Сбер): `Max` — личные ДЗ, `Lite` — текст чата, `Pro` — фото чата |
-| Запасная модель | Mistral `ministral-14b-latest` — если GigaChat не ответил |
+| Запасная модель | Mistral `ministral-14b-latest` — если GigaChat не ответил (необязательно: `pip install mistralai`) |
 | Ответ модели | JSON по схеме (structured output), даты и предметы проверяются кодом |
 | Календарь | Google Calendar API (необязательно, из меню убран) |
 | БД | SQLite (stdlib `sqlite3`) |

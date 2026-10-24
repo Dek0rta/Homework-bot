@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import importlib.util
 import logging
 import time
 from dataclasses import dataclass
@@ -324,8 +325,16 @@ class LLMRouter:
         raise RuntimeError("unreachable: цикл повторов завершился без ответа и без исключения")
 
 
+def _mistral_installed() -> bool:
+    return importlib.util.find_spec("mistralai") is not None
+
+
 def build_providers() -> list[Provider]:
-    """Провайдеры в порядке LLM_PROVIDERS; без ключа — пропускаются."""
+    """
+    Провайдеры в порядке LLM_PROVIDERS; без ключа — пропускаются.
+    Пакет mistralai необязательный: на хостинге его может не оказаться
+    в зеркале PyPI, а бот должен собираться и без запасной модели.
+    """
     providers: list[Provider] = []
     for name in config.LLM_PROVIDERS:
         if name == "gigachat" and config.GIGACHAT_CREDENTIALS:
@@ -340,6 +349,12 @@ def build_providers() -> list[Provider]:
                 },
             ))
         elif name == "mistral" and config.MISTRAL_API_KEY:
+            if not _mistral_installed():
+                logger.warning(
+                    "MISTRAL_API_KEY задан, но пакет mistralai не установлен — "
+                    "запасной модели не будет (pip install mistralai)"
+                )
+                continue
             providers.append(MistralProvider(
                 api_key=config.MISTRAL_API_KEY,
                 models={

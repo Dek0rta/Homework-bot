@@ -316,6 +316,7 @@ async def test_mistral_builds_multimodal_request_with_schema():
 def test_build_providers_respects_order_and_keys(monkeypatch):
     from src.core import config
 
+    monkeypatch.setattr(lp, "_mistral_installed", lambda: True)
     monkeypatch.setattr(config, "LLM_PROVIDERS", ["mistral", "gigachat"])
     monkeypatch.setattr(config, "MISTRAL_API_KEY", "m-key")
     monkeypatch.setattr(config, "GIGACHAT_CREDENTIALS", "g-key")
@@ -332,3 +333,17 @@ def test_set_router_overrides_singleton():
         assert lp.get_router() is router
     finally:
         lp.set_router(None)
+
+
+def test_build_providers_skips_mistral_without_package(monkeypatch, caplog):
+    """Нет пакета mistralai — бот работает на GigaChat, а не падает при старте."""
+    from src.core import config
+
+    monkeypatch.setattr(lp, "_mistral_installed", lambda: False)
+    monkeypatch.setattr(config, "LLM_PROVIDERS", ["gigachat", "mistral"])
+    monkeypatch.setattr(config, "MISTRAL_API_KEY", "m-key")
+    monkeypatch.setattr(config, "GIGACHAT_CREDENTIALS", "g-key")
+
+    with caplog.at_level("WARNING"):
+        assert [p.name for p in lp.build_providers()] == ["gigachat"]
+    assert "mistralai" in caplog.text
