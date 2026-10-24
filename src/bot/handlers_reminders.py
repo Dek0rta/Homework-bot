@@ -114,12 +114,17 @@ async def cmd_reminders_private(message: Message):
     sub = db.get_subscription(message.from_user.id)
 
     if not sub or not sub["enabled"]:
+        # Класс, если он известен, — тогда в напоминании будут и его задания
+        chats = db.get_chats_for_user(message.from_user.id)
+        db.subscribe_reminders(message.from_user.id, chats[0] if chats else message.from_user.id, DEFAULT_TIME)
+        db.log_event("reminder_subscribed", user_id=message.from_user.id, payload={"from": "private"})
         await message.answer(
-            "🔕 Напоминания выключены.\n\n"
-            "Чтобы включить, нажми кнопку в чате класса — "
-            "там я пойму, о каком расписании напоминать.\n"
-            "Команда в группе: /reminders",
+            f"🔔 <b>Напоминания включены</b>\n\n"
+            f"Каждый вечер в <b>{DEFAULT_TIME}</b> пришлю, что задано на завтра.\n"
+            "Если всё уже сделано — писать не буду.\n\n"
+            "Выбери другое время или отключи:",
             parse_mode="HTML",
+            reply_markup=_kb_times(DEFAULT_TIME),
         )
         return
 
@@ -137,7 +142,7 @@ async def cmd_reminders_off(message: Message):
     db.log_event("reminder_unsubscribed", user_id=message.from_user.id)
     await message.answer(
         "🔕 Напоминания отключены.\n"
-        "Включить снова — /reminders в чате класса."
+        "Включить снова — /reminders"
     )
 
 
@@ -151,7 +156,7 @@ async def cb_set_time(call: CallbackQuery):
 
     sub = db.get_subscription(call.from_user.id)
     if not sub:
-        await call.answer("Сначала включи напоминания в чате класса.", show_alert=True)
+        await call.answer("Сначала включи напоминания — /reminders", show_alert=True)
         return
 
     db.subscribe_reminders(call.from_user.id, sub["chat_id"], new_time)
@@ -171,6 +176,6 @@ async def cb_disable(call: CallbackQuery):
     await call.answer("Отключено")
     await call.message.edit_text(
         "🔕 Напоминания отключены.\n"
-        "Включить снова — /reminders в чате класса.",
+        "Включить снова — /reminders",
         parse_mode="HTML",
     )

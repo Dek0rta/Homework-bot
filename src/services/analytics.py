@@ -22,7 +22,7 @@ import hashlib
 import io
 import logging
 import re
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 from typing import Optional
 
 import matplotlib
@@ -31,6 +31,7 @@ import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 import numpy as np
 
+from src.core import clock
 from src.core.db import get_cached_estimate, get_connection, save_cached_estimate
 from src.services import llm, prefilter
 
@@ -202,7 +203,7 @@ def update_daily_metrics(chat_id: int, due_date: str) -> None:
 
     try:
         deadline_date = datetime.strptime(due_date, "%Y-%m-%d").date()
-        days_left = max((deadline_date - date.today()).days, 1)
+        days_left = max((deadline_date - clock.today()).days, 1)
     except Exception:
         days_left = 1
 
@@ -233,7 +234,7 @@ def get_weekly_load(chat_id: int) -> list[dict]:
     Возвращает метрики нагрузки на 14 дней начиная с сегодня.
     Дни без ДЗ включаются с нулевыми значениями.
     """
-    today = date.today()
+    today = clock.today()
     conn = get_connection()
     rows = conn.execute(
         "SELECT metric_date, task_count, total_time, stress_index "
@@ -282,7 +283,7 @@ def generate_weekly_chart(chat_id: int, chat_title: str = "Класс") -> bytes
     """
     # Фильтруем воскресенья — в школе нет уроков
     data = [d for d in get_weekly_load(chat_id) if d["weekday"] != 6]
-    today = date.today()
+    today = clock.today()
 
     labels: list[str] = []
     hours:  list[float] = []

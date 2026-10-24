@@ -2,8 +2,9 @@ from __future__ import annotations
 import logging
 import sqlite3
 import os
-from datetime import datetime, timedelta
+from datetime import timedelta
 
+from src.core import clock
 from src.core.config import DB_PATH
 
 logger = logging.getLogger(__name__)
@@ -280,7 +281,7 @@ def save_chat_homework(
         "INSERT INTO chat_homework"
         " (chat_id, subject, task, added_at, due_date, ai_confidence, created_by)"
         " VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (chat_id, subject, task, datetime.now().strftime("%d.%m %H:%M"),
+        (chat_id, subject, task, clock.now().strftime("%d.%m %H:%M"),
          due_date, ai_confidence, created_by),
     )
     hw_id = cur.lastrowid
@@ -344,6 +345,110 @@ def delete_chat_homework(hw_id: int):
     conn.execute("DELETE FROM chat_homework WHERE id = ?", (hw_id,))
     conn.commit()
     conn.close()
+
+
+def get_homework(hw_id: int) -> dict | None:
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT id, chat_id, subject, task, due_date, ai_confidence, created_by"
+            " FROM chat_homework WHERE id = ?",
+            (hw_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    return dict(row) if row else None
+
+
+def get_homework_range(chat_id: int, first_id: int, last_id: int) -> list[dict]:
+    """
+    Задания чата с id в диапазоне — одна пачка, распознанная из сообщения.
+    Задания одной пачки сохраняются подряд, поэтому диапазон их и описывает,
+    а фильтр по чату не даёт задеть чужие записи между ними.
+    """
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            "SELECT id, chat_id, subject, task, due_date, ai_confidence"
+            " FROM chat_homework WHERE chat_id = ? AND id BETWEEN ? AND ? ORDER BY id",
+            (chat_id, first_id, last_id),
+        ).fetchall()
+    finally:
+        conn.close()
+    return [dict(r) for r in rows]
+
+
+def delete_homework_range(chat_id: int, first_id: int, last_id: int) -> int:
+    conn = get_connection()
+    try:
+        cur = conn.execute(
+            "DELETE FROM chat_homework WHERE chat_id = ? AND id BETWEEN ? AND ?",
+            (chat_id, first_id, last_id),
+        )
+        conn.commit()
+        return cur.rowcount
+    finally:
+        conn.close()
+
+
+def set_homework_due(hw_id: int, due_date: str | None) -> None:
+    conn = get_connection()
+    try:
+        conn.execute("UPDATE chat_homework SET due_date = ? WHERE id = ?", (due_date, hw_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_upcoming_homework(chat_ids: list[int], user_id: int, since_iso: str) -> list[dict]:
+    """
+    Задания из указанных чатов со сроком не раньше since_iso или без срока,
+    с личной отметкой о выполнении. Сначала ближайшие, без даты — в конце.
+    """
+    if not chat_ids:
+        return []
+    placeholders = ",".join("?" * len(chat_ids))
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            "SELECT h.id, h.chat_id, h.subject, h.task, h.due_date,"
+            "       COALESCE(s.is_done, 0) AS is_done"
+            "  FROM chat_homework h"
+            "  LEFT JOIN user_homework_status s"
+            "    ON s.homework_id = h.id AND s.user_id = ?"
+            f" WHERE h.chat_id IN ({placeholders})"
+            "   AND (h.due_date IS NULL OR h.due_date >= ?)"
+            " ORDER BY h.due_date IS NULL, h.due_date, h.id",
+            (user_id, *chat_ids, since_iso),
+        ).fetchall()
+    finally:
+        conn.close()
+    return [dict(r) for r in rows]
+
+
+def set_homework_done(user_id: int, hw_id: int, is_done: bool) -> None:
+    conn = get_connection()
+    try:
+        conn.execute(
+            "INSERT INTO user_homework_status (user_id, homework_id, is_done) VALUES (?,?,?)"
+            " ON CONFLICT(user_id, homework_id) DO UPDATE SET is_done=excluded.is_done",
+            (user_id, hw_id, 1 if is_done else 0),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def is_homework_done(user_id: int, hw_id: int) -> bool:
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT is_done FROM user_homework_status WHERE user_id = ? AND homework_id = ?",
+            (user_id, hw_id),
+        ).fetchone()
+    finally:
+        conn.close()
+    return bool(row and row["is_done"])
 
 
 def clear_chat_homework(chat_id: int):
@@ -490,7 +595,7 @@ def set_parity_anchor(chat_id: int, anchor_date: str) -> None:
         "INSERT INTO class_settings (chat_id, parity_anchor, updated_at) VALUES (?,?,?)"
         " ON CONFLICT(chat_id) DO UPDATE SET"
         "   parity_anchor=excluded.parity_anchor, updated_at=excluded.updated_at",
-        (chat_id, anchor_date, datetime.now().isoformat()),
+        (chat_id, anchor_date, clock.now().isoformat()),
     )
     conn.commit()
     conn.close()
@@ -536,7 +641,7 @@ def save_override(
         " VALUES (?,?,?,?,?,?,?)"
         " ON CONFLICT(chat_id, date, slot, subgroup) DO UPDATE SET"
         "   subject=excluded.subject, note=excluded.note, created_at=excluded.created_at",
-        (chat_id, date_iso, slot, subgroup, subject, note, datetime.now().isoformat()),
+        (chat_id, date_iso, slot, subgroup, subject, note, clock.now().isoformat()),
     )
     conn.commit()
     conn.close()
@@ -584,7 +689,7 @@ def subscribe_reminders(user_id: int, chat_id: int, send_at: str = "19:00") -> N
         " VALUES (?,?,?,1,?)"
         " ON CONFLICT(user_id) DO UPDATE SET"
         "   chat_id=excluded.chat_id, send_at=excluded.send_at, enabled=1",
-        (user_id, chat_id, send_at, datetime.now().isoformat()),
+        (user_id, chat_id, send_at, clock.now().isoformat()),
     )
     conn.commit()
     conn.close()
@@ -671,7 +776,7 @@ def log_event(
                 chat_id,
                 user_id,
                 _json.dumps(payload, ensure_ascii=False) if payload else None,
-                datetime.now().isoformat(),
+                clock.now().isoformat(),
             ),
         )
         conn.commit()
@@ -753,7 +858,7 @@ def remember_chat_member(chat_id: int, user_id: int) -> None:
     conn.execute(
         "INSERT INTO chat_members (chat_id, user_id, seen_at) VALUES (?,?,?)"
         " ON CONFLICT(chat_id, user_id) DO UPDATE SET seen_at=excluded.seen_at",
-        (chat_id, user_id, datetime.now().isoformat()),
+        (chat_id, user_id, clock.now().isoformat()),
     )
     conn.commit()
     conn.close()
@@ -790,7 +895,7 @@ def save_pending_homework(chat_id: int, subject: str, task: str) -> int:
     conn = get_connection()
     cur = conn.execute(
         "INSERT INTO pending_homework (chat_id, subject, task, created_at) VALUES (?,?,?,?)",
-        (chat_id, subject, task, datetime.now().isoformat()),
+        (chat_id, subject, task, clock.now().isoformat()),
     )
     pending_id = cur.lastrowid
     conn.commit()
@@ -820,7 +925,7 @@ def take_pending_homework(pending_id: int) -> dict | None:
 
 def purge_stale_pending(older_than_days: int = 7) -> int:
     """Убирает записи, на которые никто так и не нажал. Возвращает их число."""
-    cutoff = (datetime.now() - timedelta(days=older_than_days)).isoformat()
+    cutoff = (clock.now() - timedelta(days=older_than_days)).isoformat()
     conn = get_connection()
     cur = conn.execute("DELETE FROM pending_homework WHERE created_at < ?", (cutoff,))
     conn.commit()
@@ -845,7 +950,7 @@ def save_cached_estimate(task_hash: str, minutes: int) -> None:
     conn.execute(
         "INSERT INTO hw_time_estimates (task_hash, minutes, created_at) VALUES (?,?,?)"
         " ON CONFLICT(task_hash) DO UPDATE SET minutes=excluded.minutes",
-        (task_hash, minutes, datetime.now().isoformat()),
+        (task_hash, minutes, clock.now().isoformat()),
     )
     conn.commit()
     conn.close()
@@ -1038,7 +1143,7 @@ def save_calendar_token(user_id: int, token_json: str, calendar_id: str = "prima
         "   token_json=excluded.token_json,"
         "   calendar_id=excluded.calendar_id,"
         "   updated_at=excluded.updated_at",
-        (user_id, token_json, calendar_id, datetime.now().isoformat()),
+        (user_id, token_json, calendar_id, clock.now().isoformat()),
     )
     conn.commit()
     conn.close()

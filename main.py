@@ -18,6 +18,7 @@ from src.api import webapp_api
 from src.bot import (
     handlers_edit,
     handlers_group,
+    handlers_homework,
     handlers_metrics,
     handlers_private,
     handlers_reminders,
@@ -41,14 +42,14 @@ logger = logging.getLogger(__name__)
 
 PRIVATE_COMMANDS = [
     BotCommand(command="start",       description="Главное меню"),
-    BotCommand(command="schedule",    description="Изменить расписание"),
+    BotCommand(command="hw",          description="Мои домашние задания"),
+    BotCommand(command="setup",       description="Расписание по фото"),
     BotCommand(command="my_schedule", description="Посмотреть расписание"),
+    BotCommand(command="schedule",    description="Изменить расписание вручную"),
     BotCommand(command="reminders",   description="Напоминания о домашке"),
     BotCommand(command="reminders_off", description="Отключить напоминания"),
     BotCommand(command="stats",       description="График нагрузки класса"),
     BotCommand(command="backup",      description="Резервная копия расписания"),
-    BotCommand(command="auth",        description="Подключить Google Calendar"),
-    BotCommand(command="disconnect_calendar", description="Отвязать Google Calendar"),
     BotCommand(command="cancel",      description="Отменить текущее действие"),
     BotCommand(command="help",        description="Справка по командам"),
 ]
@@ -106,13 +107,14 @@ async def main() -> None:
     dp  = Dispatcher(storage=JsonStorage(FSM_PATH))
 
     # Онбординг первым: во время настройки фото и текст — это расписание,
-    # а не домашнее задание. Дальше личные хендлеры (их фильтры уже),
-    # групповые ловят остальное.
+    # а не домашнее задание. Дальше команды и кнопки личного чата, затем
+    # приём ДЗ (он ловит любой текст и фото в личке), групповые — последними.
     dp.include_router(onboarding.router)
     dp.include_router(handlers_reminders.router)
     dp.include_router(handlers_metrics.router)
     dp.include_router(handlers_edit.router)
     dp.include_router(handlers_private.router)
+    dp.include_router(handlers_homework.router)
     dp.include_router(handlers_group.router)
 
     await bot.set_my_commands(PRIVATE_COMMANDS, scope=BotCommandScopeAllPrivateChats())

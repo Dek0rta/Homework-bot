@@ -11,6 +11,3 @@ class ScheduleSetup(StatesGroup):
 class CalendarAuth(StatesGroup):
     waiting_for_code = State()
 
-
-class HomeworkConfirm(StatesGroup):
-    choosing_day = State()

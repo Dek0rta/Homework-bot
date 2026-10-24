@@ -1,6 +1,6 @@
 """
-Хендлеры личного чата: редактор расписания, Google Calendar, разбор ДЗ,
-график нагрузки и справка.
+Хендлеры личного чата: меню, редактор расписания, Google Calendar,
+график нагрузки и справка. Разбор присланных ДЗ — в handlers_homework.
 """
 
 from __future__ import annotations
@@ -8,9 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
-import tempfile
-from datetime import datetime
+from html import escape
 
 from aiogram import F, Router
 from aiogram.filters import Command
@@ -30,11 +28,10 @@ from src.bot.keyboards import (
     MAIN_KB,
     kb_days,
     kb_lessons,
-    kb_pick_hw_day,
     temp_get_subject,
     temp_set_subject,
 )
-from src.bot.states import CalendarAuth, HomeworkConfirm, ScheduleSetup
+from src.bot.states import CalendarAuth, ScheduleSetup
 from src.bot.utils import safe_delete
 from src.core import db
 from src.core.constants import (
@@ -49,8 +46,6 @@ from src.core.constants import (
 )
 from src.services import analytics
 from src.services import calendar as calendar_api
-from src.services import llm
-from src.services import schedule as sched_module
 
 logger = logging.getLogger(__name__)
 
@@ -66,18 +61,15 @@ _auth_flows: dict[int, object] = {}
 async def cmd_start(message: Message):
     await safe_delete(message)
     await message.answer(
-        f"Привет, <b>{message.from_user.first_name}</b>! "
-        "Я добавляю домашние задания прямо в Google Calendar.\n\n"
-        "<b>Быстрый старт:</b>\n"
-        "1. <b>📸 Пришли фото расписания</b> — распознаю сам\n"
-        "2. <b>🔗 Google Calendar</b> — подключи аккаунт\n"
-        "3. Отправь фото тетради или текст с ДЗ — готово!\n\n"
-        "<b>Команды:</b>\n"
-        "/setup — расписание по фото\n"
-        "/schedule — вписать расписание вручную\n"
-        "/my_schedule — посмотреть расписание\n"
-        "/auth — подключить Google Calendar\n"
-        "/stats — график нагрузки класса",
+        f"Привет, <b>{escape(message.from_user.first_name)}</b>! "
+        "Я веду твои домашние задания.\n\n"
+        "<b>Просто присылай мне ДЗ</b> — текстом, фото дневника, доски "
+        "или тетради, скриншотом, можно сразу несколько фото или пересланное "
+        "из чата класса. Найду все задания, поставлю дату сдачи и запишу.\n\n"
+        "<b>Чтобы даты ставились сами</b> — один раз пришли фото расписания: /setup\n\n"
+        "📋 /hw — мои задания\n"
+        "🔔 /reminders — напоминать вечером\n"
+        "📅 /my_schedule — расписание",
         parse_mode="HTML",
         reply_markup=MAIN_KB,
     )
@@ -95,16 +87,19 @@ async def cmd_help_private(message: Message):
     await message.answer(
         "📱 <b>Команды (личный чат)</b>\n\n"
         "/start — главное меню\n"
-        "/schedule — редактор расписания по дням\n"
+        "/hw — мои задания\n"
+        "/setup — расписание по фото\n"
+        "/schedule — вписать расписание вручную\n"
         "/my_schedule — посмотреть своё расписание\n"
-        "/auth — подключить Google Calendar\n"
+        "/reminders — вечерние напоминания\n"
         "/stats — график нагрузки класса\n"
         "/backup — резервная копия расписания\n"
         "/cancel — отменить текущее действие\n\n"
         "<b>Как пользоваться:</b>\n"
-        "1. Настрой расписание — /schedule\n"
-        "2. Подключи Google Calendar — /auth\n"
-        "3. Отправь фото ДЗ или текст — бот сам добавит\n\n"
+        "1. Пришли фото расписания — /setup\n"
+        "2. Присылай ДЗ как угодно: текст, фото, альбом, пересланное — "
+        "бот сам найдёт задания и поставит даты\n"
+        "3. Дату или лишнее задание поправь кнопками под карточкой\n\n"
         "<b>В группе/канале:</b>\n"
         "Добавь бота, выдай права администратора,\n"
         "затем выполни /setup_subjects — /help покажет подробности.",
@@ -452,69 +447,9 @@ async def handle_auth_code(message: Message, state: FSMContext):
         await state.clear()
 
 
-# ── Разбор ДЗ и добавление в календарь ────────────────────────────────────────
-
-def _find_subject_days(subject: str, schedule: list[dict]) -> list[dict]:
-    """Все уроки расписания с совпадающим предметом (без учёта регистра)."""
-    s = subject.strip().lower()
-    return [e for e in schedule if e["subject"].strip().lower() == s]
-
-
-async def _do_add_to_calendar(status: Message, parsed: dict, user_id: int):
-    """Добавляет ДЗ в календарь пользователя и редактирует статусное сообщение."""
-    subject  = parsed.get("subject", "Неизвестно")
-    task     = parsed.get("task", "")
-    day      = parsed.get("due_lesson_day")
-    time_str = parsed.get("due_lesson_time")
-
-    if day is None or not time_str:
-        await status.edit_text(
-            f"Предмет: <b>{subject}</b>\n"
-            f"Задание: {task}\n\n"
-            "Не смог определить ближайший урок. Проверь расписание.",
-            parse_mode="HTML",
-        )
-        return
-
-    # Пользователь выбрал конкретную дату — используем её, иначе ближайший урок
-    if "lesson_dt_iso" in parsed:
-        lesson_dt = datetime.fromisoformat(parsed["lesson_dt_iso"])
-    else:
-        lesson_dt = sched_module.next_lesson_datetime(day, time_str)
-
-    try:
-        event_link = await calendar_api.add_homework_event(user_id, subject, task, lesson_dt)
-    except RuntimeError as e:
-        if "not_authorized" in str(e):
-            await status.edit_text(
-                f"Предмет: <b>{subject}</b>\n"
-                f"Задание: {task}\n\n"
-                "Google Calendar не подключён к твоему аккаунту.\n"
-                "Нажми 🔗 Google Calendar или выполни /auth.",
-                parse_mode="HTML",
-            )
-        else:
-            await status.edit_text(f"Ошибка Calendar: {e}")
-        return
-    except Exception as e:
-        logger.exception("Calendar error")
-        await status.edit_text(f"Ошибка при добавлении в Calendar: {e}")
-        return
-
-    kb_rows = []
-    if event_link:
-        kb_rows.append([InlineKeyboardButton(text="📅 Открыть в календаре", url=event_link)])
-    kb_rows.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="main:menu")])
-
-    await status.edit_text(
-        "✅ <b>Добавлено в Google Calendar!</b>\n\n"
-        f"📚 <b>Предмет:</b> {subject}\n"
-        f"📝 <b>Задание:</b> {task}\n"
-        f"📅 <b>Урок:</b> {DAYS_RU[day]}, {lesson_dt.strftime('%d.%m')} в {time_str}",
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows),
-    )
-
+# ── Старые кнопки ────────────────────────────────────────────────────────────
+# Разбор ДЗ живёт в handlers_homework. Здесь — ответы на кнопки карточек
+# прежней версии, которые остались в истории чатов.
 
 @router.callback_query(F.data == "main:menu")
 async def cb_main_menu(call: CallbackQuery):
@@ -523,141 +458,12 @@ async def cb_main_menu(call: CallbackQuery):
     await call.bot.send_message(call.message.chat.id, "Главное меню", reply_markup=MAIN_KB)
 
 
-async def _apply_parsed(
-    status: Message,
-    parsed: dict,
-    state: FSMContext,
-    schedule: list[dict],
-    user_id: int,
-):
-    """Сверяет предмет с расписанием и либо добавляет ДЗ, либо просит уточнить день."""
-    subject  = parsed.get("subject", "Неизвестно")
-    task     = parsed.get("task", "")
-    matching = _find_subject_days(subject, schedule)
-
-    if not matching:
-        await status.edit_text(
-            f"Предмет <b>{subject}</b> не найден в расписании.\n"
-            "Проверь расписание командой /my_schedule.",
-            parse_mode="HTML",
-        )
-        return
-
-    if len(matching) > 1:
-        await state.set_state(HomeworkConfirm.choosing_day)
-        await state.update_data(pending_parsed=parsed)
-        await status.edit_text(
-            f"📚 <b>{subject}</b>\n"
-            f"📝 {task}\n\n"
-            "Этот предмет есть в нескольких днях — выбери нужный урок:",
-            parse_mode="HTML",
-            reply_markup=kb_pick_hw_day(matching),
-        )
-        return
-
-    # Ровно одно совпадение — день/время берём из расписания, а не из ответа LLM
-    parsed["due_lesson_day"]  = matching[0]["day_of_week"]
-    parsed["due_lesson_time"] = matching[0]["start_time"]
-    await _do_add_to_calendar(status, parsed, user_id)
-
-
-@router.callback_query(HomeworkConfirm.choosing_day, F.data.startswith("hw|pick|"))
-async def cb_pick_hw_day(call: CallbackQuery, state: FSMContext):
-    await call.answer()
-    # формат: hw|pick|{day}|{HH:MM}|{YYYYMMDD}
-    _, _, day_str, time_str, date_raw = call.data.split("|")
-    lesson_dt = datetime.combine(
-        datetime.strptime(date_raw, "%Y%m%d").date(),
-        datetime.strptime(time_str, "%H:%M").time(),
+@router.callback_query(F.data.startswith("hw|pick|"))
+async def cb_stale_pick(call: CallbackQuery):
+    await call.answer(
+        "Эта кнопка устарела — бот теперь сам ставит дату. Пришли задание ещё раз.",
+        show_alert=True,
     )
-
-    data   = await state.get_data()
-    parsed = data.get("pending_parsed", {})
-    parsed["due_lesson_day"]  = int(day_str)
-    parsed["due_lesson_time"] = time_str
-    parsed["lesson_dt_iso"]   = lesson_dt.isoformat()
-
-    await state.clear()
-    await safe_delete(call.message)
-    status = await call.bot.send_message(call.message.chat.id, "Добавляю в Calendar...")
-    await _do_add_to_calendar(status, parsed, call.from_user.id)
-
-
-async def process_homework(message: Message, text: str, state: FSMContext):
-    await safe_delete(message)
-
-    if not db.has_schedule(message.from_user.id):
-        await message.answer(
-            "Сначала нужно расписание.\n\n"
-            "📸 Пришли его фото — распознаю сам: /setup\n"
-            "✏️ Или впиши вручную: /schedule",
-            reply_markup=MAIN_KB,
-        )
-        return
-
-    schedule = db.get_schedule(message.from_user.id)
-    status   = await message.answer("Анализирую задание...")
-
-    try:
-        parsed = await llm.parse_homework_text(text, schedule)
-    except Exception as e:
-        logger.exception("LLM error")
-        await status.edit_text(f"Ошибка при анализе текста: {e}")
-        return
-
-    await _apply_parsed(status, parsed, state, schedule, message.from_user.id)
-
-
-@router.message(F.chat.type == "private", F.photo)
-async def handle_photo(message: Message, state: FSMContext):
-    # Идёт настройка — фото это расписание, а не домашнее задание
-    if await onboarding.try_parse_schedule_photo(message):
-        return
-
-    await safe_delete(message)
-
-    if not db.has_schedule(message.from_user.id):
-        await message.answer(
-            "Сначала нужно расписание.\n\n"
-            "📸 Пришли его фото — распознаю сам: /setup\n"
-            "✏️ Или впиши вручную: /schedule",
-            reply_markup=MAIN_KB,
-        )
-        return
-
-    status = await message.answer("Читаю фото...")
-    photo  = message.photo[-1]
-    file   = await message.bot.get_file(photo.file_id)
-
-    with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
-        tmp_path = tmp.name
-
-    try:
-        await message.bot.download_file(file.file_path, tmp_path)
-        schedule = db.get_schedule(message.from_user.id)
-
-        try:
-            parsed = await llm.parse_homework_image(tmp_path, schedule)
-        except Exception as e:
-            logger.exception("LLM image error")
-            await status.edit_text(f"Ошибка при анализе фото: {e}")
-            return
-
-        await _apply_parsed(status, parsed, state, schedule, message.from_user.id)
-    finally:
-        os.unlink(tmp_path)
-
-
-@router.message(F.chat.type == "private", F.text & ~F.text.startswith("/") & ~F.text.in_(BUTTON_TEXTS))
-async def handle_text(message: Message, state: FSMContext):
-    if await state.get_state() is not None:
-        return
-
-    # Идёт настройка — длинный текст это расписание, а не домашнее задание
-    if await onboarding.try_parse_schedule_text(message):
-        return
-
-    await process_homework(message, message.text, state)
 
 
 # ── График нагрузки ───────────────────────────────────────────────────────────

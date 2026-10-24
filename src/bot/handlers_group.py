@@ -7,9 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
-import tempfile
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 
 from aiogram import F, Router
 from aiogram.exceptions import TelegramAPIError
@@ -23,12 +21,14 @@ from aiogram.types import (
     ReactionTypeEmoji,
 )
 
-from src.bot import onboarding
-from src.bot.keyboards import kb_hw_due_day
+from src.bot import homework_cards as cards
+from src.bot import media, onboarding
 from src.bot.utils import delete_after, fmt_due_date, is_chat_admin, safe_delete
-from src.core import db
+from src.core import clock, db
 from src.core.constants import DAYS_RU, GROUP_TYPES
 from src.services import analytics, llm, prefilter, timetable
+from src.services import homework_intake as intake
+from src.services.llm_providers import ImageInput
 from src.services.weeks import parity_suffix
 
 logger = logging.getLogger(__name__)
@@ -152,35 +152,68 @@ async def cmd_undo_change(message: Message):
 
 # ── Детекция ДЗ в сообщениях ──────────────────────────────────────────────────
 
-async def _handle_group_message(message: Message, text: str | None = None, image_path: str | None = None):
-    """Проверяем настроенные предметы → детектируем ДЗ через LLM → спрашиваем день сдачи."""
-    subjects = db.get_chat_subjects(message.chat.id)
+# Карточка с распознанными заданиями висит в чате столько, чтобы успеть
+# поправить дату, и не засоряет переписку дольше
+GROUP_CARD_TTL_SECONDS = 600
+
+
+async def _handle_group_message(
+    message: Message,
+    text: str = "",
+    images: list[ImageInput] | None = None,
+) -> None:
+    """
+    Находит в сообщении ДЗ и сразу записывает его с датой из расписания.
+    Раньше бот спрашивал «на какой день задали?» — если никто не нажимал
+    кнопку, задание терялось. Теперь дату можно поправить под карточкой.
+    """
+    chat_id  = message.chat.id
+    subjects = db.get_chat_subjects(chat_id)
     if not subjects:
         return
 
-    try:
-        if image_path:
-            result = await llm.detect_group_homework_image(image_path, subjects)
-        else:
-            # Предфильтр отсекает переписку до платного вызова модели
-            if not prefilter.should_analyze(text):
+    if not images:
+        # Предфильтр отсекает переписку до вызова модели
+        if not prefilter.should_analyze(text):
+            return
+
+        # Замена урока обсуждается в том же чате — проверяем до ДЗ
+        if prefilter.has_override_markers(text):
+            if await _try_handle_override(message, text, subjects):
                 return
 
-            # Замена урока обсуждается в том же чате — проверяем до ДЗ
-            if prefilter.has_override_markers(text):
-                if await _try_handle_override(message, text, subjects):
-                    return
-
-            result = await llm.detect_group_homework(text, subjects)
+    today = clock.today()
+    try:
+        items = await intake.analyze(
+            text=text,
+            images=images or [],
+            schedule=intake.schedule_for_chat(chat_id),
+            today=today,
+            source="chat",
+            subjects=subjects,
+        )
     except Exception:
         logger.exception("Group homework detection error")
         return
 
-    if not result:
+    if not items:
         return
 
-    subject = result.get("subject", "")
-    task    = result.get("task", "")
+    ids: list[int] = []
+    for item in items:
+        if db.chat_homework_exists(chat_id, item.subject, item.task):
+            continue
+        due   = item.due_date.isoformat() if item.due_date else None
+        hw_id = db.save_chat_homework(chat_id, item.subject, item.task, due, ai_confidence=item.confidence)
+        ids.append(hw_id)
+        db.log_event("homework_added", chat_id=chat_id, payload={
+            "has_due_date": due is not None, "due_source": item.due_source, "auto": True,
+        })
+        if due:
+            asyncio.create_task(_analyze_hw_async(chat_id, hw_id, item.subject, item.task, due))
+
+    if not ids:
+        return  # всё уже было в списке — молчим, чтобы не шуметь в чате
 
     # Реакция 👀 — сигнал, что бот увидел ДЗ
     try:
@@ -188,33 +221,16 @@ async def _handle_group_message(message: Message, text: str | None = None, image
     except TelegramAPIError as e:
         logger.debug("Не удалось поставить реакцию 👀: %s", e)
 
-    # Ищем уроки с этим предметом в расписании класса
-    sched_entries = [
-        e for e in db.get_schedule_for_chat(message.chat.id)
-        if e["subject"].strip().lower() == subject.strip().lower()
-    ]
+    notes = []
+    if not db.has_class_schedule(chat_id) and not db.get_chat_schedule_owner(chat_id):
+        notes.append("<i>💡 Пришлите фото расписания через /setup — даты будут ставиться сами.</i>")
 
-    # Очередь живёт в БД: рестарт бота между вопросом и нажатием кнопки
-    # больше не теряет задание
-    pending_id = db.save_pending_homework(message.chat.id, subject, task)
-
-    if sched_entries:
-        hint = ""
-    elif db.has_class_schedule(message.chat.id):
-        hint = "\n\n<i>⚠️ Предмет не найден в расписании — выбери день вручную.</i>"
-    else:
-        hint = (
-            "\n\n<i>⚠️ Расписание не настроено. "
-            "Пришлите фото расписания через /setup — даты будут подбираться сами.</i>"
-        )
-
-    await message.reply(
-        "📚 <b>ДЗ найдено</b>\n"
-        f"<b>{subject}</b> — {task}\n\n"
-        f"📅 На какой день задали?{hint}",
-        parse_mode="HTML",
-        reply_markup=kb_hw_due_day(pending_id, sched_entries or None),
+    rows = db.get_homework_range(chat_id, ids[0], ids[-1])
+    card_text, keyboard = cards.render_card(
+        rows, prefix="gh", first_id=ids[0], last_id=ids[-1], today=today, notes=notes,
     )
+    card = await message.reply(card_text, parse_mode="HTML", reply_markup=keyboard)
+    asyncio.create_task(delete_after(card, delay=GROUP_CARD_TTL_SECONDS))
 
 
 def _track_member(message: Message) -> None:
@@ -250,17 +266,16 @@ async def handle_group_photo(message: Message):
     if await onboarding.try_parse_schedule_photo(message):
         return
 
-    photo = message.photo[-1]
-    file  = await message.bot.get_file(photo.file_id)
-
-    with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
-        tmp_path = tmp.name
+    # Без настроенных предметов фото даже не скачиваем
+    if not db.get_chat_subjects(message.chat.id):
+        return
 
     try:
-        await message.bot.download_file(file.file_path, tmp_path)
-        await _handle_group_message(message, image_path=tmp_path)
-    finally:
-        os.unlink(tmp_path)
+        image = await media.image_from_message(message)
+    except media.UnsupportedImage:
+        return
+    if image:
+        await _handle_group_message(message, text=media.message_text(message), images=[image])
 
 
 @router.callback_query(F.data.startswith("hw|cd|"))
@@ -451,7 +466,7 @@ async def cmd_today(message: Message):
 
     subgroup = db.get_user_subgroup(message.chat.id, message.from_user.id) if message.from_user else 0
     await message.reply(
-        timetable.format_day(message.chat.id, date.today(), subgroup),
+        timetable.format_day(message.chat.id, clock.today(), subgroup),
         parse_mode="HTML",
     )
 
@@ -466,7 +481,7 @@ async def cmd_tomorrow(message: Message):
 
     subgroup = db.get_user_subgroup(message.chat.id, message.from_user.id) if message.from_user else 0
     await message.reply(
-        timetable.format_day(message.chat.id, date.today() + timedelta(days=1), subgroup),
+        timetable.format_day(message.chat.id, clock.today() + timedelta(days=1), subgroup),
         parse_mode="HTML",
     )
 
@@ -584,7 +599,7 @@ async def cb_set_week(call: CallbackQuery):
 
     # Опорная дата — понедельник нечётной недели. Если сейчас чётная,
     # значит нечётной была прошлая.
-    this_monday = date.today() - timedelta(days=date.today().weekday())
+    this_monday = clock.today() - timedelta(days=clock.today().weekday())
     anchor = this_monday if parity == "odd" else this_monday - timedelta(days=7)
 
     db.set_parity_anchor(call.message.chat.id, anchor.isoformat())
@@ -704,7 +719,7 @@ async def cmd_export_csv(message: Message):
     await safe_delete(message)
     try:
         csv_bytes = analytics.export_csv(message.chat.id)
-        today_str = datetime.today().strftime("%Y%m%d")
+        today_str = clock.now().strftime("%Y%m%d")
         await message.answer_document(
             BufferedInputFile(csv_bytes, filename=f"load_{today_str}.csv"),
             caption=(

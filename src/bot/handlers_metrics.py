@@ -9,13 +9,13 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import Message
 
-from src.core import db
+from src.core import clock, db
 from src.core.config import ADMIN_USER_ID
 
 logger = logging.getLogger(__name__)
@@ -42,8 +42,8 @@ async def cmd_metrics(message: Message):
     if not ADMIN_USER_ID or message.from_user.id != ADMIN_USER_ID:
         return  # молча: обычному пользователю знать о команде незачем
 
-    week_ago  = (datetime.now() - timedelta(days=7)).isoformat()
-    month_ago = (datetime.now() - timedelta(days=30)).isoformat()
+    week_ago  = (clock.now() - timedelta(days=7)).isoformat()
+    month_ago = (clock.now() - timedelta(days=30)).isoformat()
 
     all_time = db.event_counts()
     week     = db.event_counts(week_ago)

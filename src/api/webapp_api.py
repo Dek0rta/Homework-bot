@@ -27,14 +27,14 @@ import json
 import logging
 import os
 import re
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 from typing import Any
 from urllib.parse import urlparse
 
 from aiohttp import web
 
 from src.api.auth import AuthError, authenticate
-from src.core import db
+from src.core import clock, db
 from src.core.constants import lesson_number
 
 logger = logging.getLogger(__name__)
@@ -171,12 +171,25 @@ def _chats_for(user_id: int) -> list[int]:
     return chats
 
 
+def _visible_chats(user_id: int) -> list[int]:
+    """
+    Чьи задания пользователь видит и может править: его классы, личный
+    список (личные ДЗ хранятся с chat_id = user_id) и задания без привязки.
+    """
+    return _chats_for(user_id) + [user_id, 0]
+
+
+def _can_modify(hw_id: int, user_id: int) -> bool:
+    row = db.get_homework(hw_id)
+    return row is not None and row["chat_id"] in _visible_chats(user_id)
+
+
 # ── Нормализация дат ──────────────────────────────────────────────────────────
 
 def _norm_deadline(due_date: str | None) -> str:
     """Любой формат даты из БД → YYYY-MM-DD для фронтенда."""
     if not due_date:
-        return (date.today() + timedelta(days=1)).isoformat()
+        return (clock.today() + timedelta(days=1)).isoformat()
     if re.match(r"^\d{4}-\d{2}-\d{2}$", due_date):
         return due_date
     m = re.match(r"^(\d{1,2})\.(\d{2})\.(\d{4})$", due_date)
@@ -184,19 +197,19 @@ def _norm_deadline(due_date: str | None) -> str:
         return f"{m.group(3)}-{m.group(2)}-{int(m.group(1)):02d}"
     m = re.match(r"^(\d{1,2})\.(\d{2})$", due_date)
     if m:
-        return f"{date.today().year}-{m.group(2)}-{int(m.group(1)):02d}"
-    return (date.today() + timedelta(days=1)).isoformat()
+        return f"{clock.today().year}-{m.group(2)}-{int(m.group(1)):02d}"
+    return (clock.today() + timedelta(days=1)).isoformat()
 
 
 def _norm_created_at(added_at: str | None) -> str:
     """Формат бота 'DD.MM HH:MM' → ISO 8601."""
     if not added_at:
-        return datetime.now().isoformat()
+        return clock.now().isoformat()
     m = re.match(r"^(\d{1,2})\.(\d{2})\s+(\d{2}):(\d{2})$", added_at)
     if m:
         try:
             return datetime(
-                date.today().year, int(m.group(2)), int(m.group(1)),
+                clock.today().year, int(m.group(2)), int(m.group(1)),
                 int(m.group(3)), int(m.group(4)),
             ).isoformat()
         except ValueError as e:
@@ -205,7 +218,7 @@ def _norm_created_at(added_at: str | None) -> str:
             logger.warning("Некорректная дата создания ДЗ %r: %s", added_at, e)
     else:
         logger.warning("Неизвестный формат даты создания ДЗ: %r", added_at)
-    return datetime.now().isoformat()
+    return clock.now().isoformat()
 
 
 def _row_to_hw(row: Any) -> dict:
@@ -250,7 +263,7 @@ async def handle_get_homework(_request: web.Request, user_id: int) -> web.Respon
     chat_id=0 — задания, добавленные через WebApp без привязки к группе;
     они видны всем, так как принадлежность определить нельзя.
     """
-    chat_ids = _chats_for(user_id) + [0]
+    chat_ids = _visible_chats(user_id)
     placeholders = ",".join("?" * len(chat_ids))
 
     conn = db.get_connection()
@@ -277,9 +290,10 @@ async def handle_post_homework(request: web.Request, user_id: int) -> web.Respon
     if not subject or not description:
         return _json({"error": "subject and description required"}, status=400)
 
-    # Привязываем к классу автора; 0 — если класс определить не удалось
+    # Привязываем к классу автора; без класса — в личный список. Раньше
+    # такие задания уходили в chat_id=0 и были видны всем пользователям.
     chats   = _chats_for(user_id)
-    chat_id = chats[0] if chats else 0
+    chat_id = chats[0] if chats else user_id
     hw_id   = db.save_chat_homework(
         chat_id, subject, description, deadline or None, created_by=user_id,
     )
@@ -294,14 +308,17 @@ async def handle_post_homework(request: web.Request, user_id: int) -> web.Respon
         "description": description,
         "deadline":    _norm_deadline(deadline),
         "photos":      photos,
-        "createdAt":   datetime.now().isoformat(),
+        "createdAt":   clock.now().isoformat(),
         "createdBy":   user_id,
     }, status=201)
 
 
 @_authed
-async def handle_put_homework(request: web.Request, _user_id: int) -> web.Response:
+async def handle_put_homework(request: web.Request, user_id: int) -> web.Response:
     hw_id       = int(request.match_info["id"])
+    if not _can_modify(hw_id, user_id):
+        return _json({"error": "not found"}, status=404)
+
     data        = await request.json()
     subject     = str(data.get("subject",     "") or "").strip()
     description = str(data.get("description", "") or "").strip()
@@ -322,14 +339,17 @@ async def handle_put_homework(request: web.Request, _user_id: int) -> web.Respon
         "description": description,
         "deadline":    _norm_deadline(deadline),
         "photos":      photos,
-        "createdAt":   datetime.now().isoformat(),
+        "createdAt":   clock.now().isoformat(),
         "createdBy":   0,
     })
 
 
 @_authed
-async def handle_delete_homework(request: web.Request, _user_id: int) -> web.Response:
-    db.delete_chat_homework(int(request.match_info["id"]))
+async def handle_delete_homework(request: web.Request, user_id: int) -> web.Response:
+    hw_id = int(request.match_info["id"])
+    if not _can_modify(hw_id, user_id):
+        return _json({"error": "not found"}, status=404)
+    db.delete_chat_homework(hw_id)
     return _json({"ok": True})
 
 
@@ -430,7 +450,7 @@ async def handle_post_grade(request: web.Request, user_id: int) -> web.Response:
     if value not in (2, 3, 4, 5):
         return _json({"error": "value must be 2–5"}, status=400)
 
-    today    = date.today().isoformat()
+    today    = clock.today().isoformat()
     grade_id = db.save_grade(user_id, subject, value, today, note)
     return _json({
         "id":      str(grade_id),

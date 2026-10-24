@@ -14,8 +14,6 @@
 from __future__ import annotations
 
 import logging
-import os
-import tempfile
 
 from aiogram import F, Router
 from aiogram.filters import Command
@@ -27,6 +25,7 @@ from aiogram.types import (
     Message,
 )
 
+from src.bot import media
 from src.bot.utils import is_chat_admin
 from src.core import db
 from src.core.constants import DAYS_RU, GROUP_TYPES, LESSON_TIMES
@@ -163,21 +162,16 @@ async def try_parse_schedule_photo(message: Message) -> bool:
 
     status = await message.reply("Читаю расписание...")
 
-    photo = message.photo[-1]
-    file  = await message.bot.get_file(photo.file_id)
-
-    with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
-        tmp_path = tmp.name
-
     try:
-        await message.bot.download_file(file.file_path, tmp_path)
-        result = await llm.parse_schedule_image(tmp_path)
+        image = await media.image_from_message(message)
+        if image is None:
+            await status.edit_text("Пришлите расписание фотографией или текстом.")
+            return True
+        result = await llm.parse_schedule_image(image)
     except Exception:
         logger.exception("Ошибка распознавания расписания")
         await status.edit_text("Не получилось прочитать фото. Попробуйте ещё раз.")
         return True
-    finally:
-        os.unlink(tmp_path)
 
     await _handle_parsed(status, message.chat.id, result)
     return True
@@ -273,11 +267,11 @@ async def cb_save_schedule(call: CallbackQuery):
 
     if is_private:
         tail = (
-            "Теперь отправь фото или текст с домашним заданием — "
-            "добавлю его в Google Calendar.\n\n"
+            "Теперь просто присылай домашние задания — текстом или фото. "
+            "Даты сдачи буду ставить по этому расписанию.\n\n"
+            "📋 /hw — мои задания\n"
             "📅 /my_schedule — посмотреть расписание\n"
-            "✏️ /schedule — поправить вручную\n"
-            "🔗 /auth — подключить календарь"
+            "✏️ /schedule — поправить вручную"
         )
     else:
         tail = (

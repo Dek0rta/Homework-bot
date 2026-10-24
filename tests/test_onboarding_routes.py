@@ -12,7 +12,7 @@ from __future__ import annotations
 from aiogram import F
 from aiogram.filters import Command
 
-from src.bot import handlers_private, onboarding
+from src.bot import handlers_homework, handlers_private, onboarding
 from src.core.constants import GROUP_TYPES
 
 
@@ -34,19 +34,27 @@ def test_photo_handler_checks_onboarding_first():
     """
     import inspect
 
-    source = inspect.getsource(handlers_private.handle_photo)
+    source = inspect.getsource(handlers_homework.handle_photo)
     assert "try_parse_schedule_photo" in source
 
     # Проверка идёт до обработки как ДЗ
-    assert source.index("try_parse_schedule_photo") < source.index("has_schedule")
+    assert source.index("try_parse_schedule_photo") < source.index("process_messages")
+
+
+def test_album_handler_checks_onboarding_first():
+    """Альбом из фото расписания во время настройки — тоже расписание."""
+    import inspect
+
+    source = inspect.getsource(handlers_homework.handle_album)
+    assert source.index("try_parse_schedule_photo") < source.index("process_messages")
 
 
 def test_text_handler_checks_onboarding_first():
     import inspect
 
-    source = inspect.getsource(handlers_private.handle_text)
+    source = inspect.getsource(handlers_homework.handle_text)
     assert "try_parse_schedule_text" in source
-    assert source.index("try_parse_schedule_text") < source.index("process_homework")
+    assert source.index("try_parse_schedule_text") < source.index("process_messages")
 
 
 def test_schedule_button_offers_photo_path():

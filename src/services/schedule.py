@@ -2,6 +2,8 @@ from __future__ import annotations
 import re
 from datetime import datetime, timedelta
 
+from src.core import clock
+
 # Маппинг названий дней → номер (0=Пн)
 _DAY_MAP: dict[str, int] = {
     "пн": 0, "понедельник": 0,
@@ -63,7 +65,7 @@ def next_lesson_datetime(day_of_week: int, time_str: str) -> datetime:
     Возвращает datetime ближайшего урока (day_of_week, time_str).
     Если сегодня тот же день, но урок уже прошёл — берём следующую неделю.
     """
-    now = datetime.now()
+    now = clock.now()
     today = now.date()
     today_wd = today.weekday()  # 0=Пн
 

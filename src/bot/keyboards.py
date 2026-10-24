@@ -1,8 +1,6 @@
-"""Построение клавиатур: главное меню, редактор расписания, выбор дня сдачи ДЗ."""
+"""Построение клавиатур: главное меню и редактор расписания."""
 
 from __future__ import annotations
-
-from datetime import datetime, timedelta
 
 from aiogram.types import (
     InlineKeyboardButton,
@@ -14,23 +12,20 @@ from aiogram.types import (
 
 from src.core.config import WEB_APP_URL
 from src.core.constants import (
-    BTN_CALENDAR,
+    BTN_HOMEWORK,
     BTN_SCHEDULE,
     BTN_SET_SCHEDULE,
     BTN_STATS,
     BTN_WEBAPP,
-    DAYS_RU,
     DAYS_SHORT,
     LESSON_TIMES,
-    MONTHS_SHORT,
 )
-from src.services import schedule as sched_module
 
 
 def build_main_kb() -> ReplyKeyboardMarkup:
     rows = [
         [KeyboardButton(text=BTN_SET_SCHEDULE), KeyboardButton(text=BTN_SCHEDULE)],
-        [KeyboardButton(text=BTN_CALENDAR),     KeyboardButton(text=BTN_STATS)],
+        [KeyboardButton(text=BTN_HOMEWORK),     KeyboardButton(text=BTN_STATS)],
     ]
     if WEB_APP_URL:
         rows.append([KeyboardButton(text=BTN_WEBAPP, web_app=WebAppInfo(url=WEB_APP_URL))])
@@ -90,72 +85,4 @@ def kb_lessons(day: int, temp: dict) -> InlineKeyboardMarkup:
 
     rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
     rows.append([InlineKeyboardButton(text="◀️ К дням", callback_data="sched:back")])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-# ── Клавиатуры выбора дня сдачи ДЗ ────────────────────────────────────────────
-
-def kb_hw_due_day(hw_key: int, entries: list[dict] | None = None) -> InlineKeyboardMarkup:
-    """
-    Кнопки выбора дня сдачи ДЗ (групповой сценарий).
-    entries — слоты расписания по предмету (day_of_week + start_time).
-      Если переданы — показываем ближайшие 2 даты для каждого слота.
-      Если None/пусто — fallback: следующие 7 дней без воскресенья.
-    """
-    rows: list[list[InlineKeyboardButton]] = []
-
-    if entries:
-        for e in entries:
-            for dt in sched_module.future_lesson_datetimes(e["day_of_week"], e["start_time"], n=2):
-                label = (
-                    f"{DAYS_RU[e['day_of_week']]} {dt.day} {MONTHS_SHORT[dt.month - 1]}"
-                    f" · {e['start_time']}"
-                )
-                rows.append([InlineKeyboardButton(
-                    text=label,
-                    callback_data=f"hw|cd|{hw_key}|{dt.strftime('%Y%m%d')}",
-                )])
-    else:
-        today = datetime.today().date()
-        row: list[InlineKeyboardButton] = []
-        for delta in range(7):
-            d = today + timedelta(days=delta)
-            if d.weekday() == 6:  # воскресенье пропускаем
-                continue
-            if delta == 0:
-                label = f"Сегодня {DAYS_SHORT[d.weekday()]} {d.day}"
-            elif delta == 1:
-                label = f"Завтра {DAYS_SHORT[d.weekday()]} {d.day}"
-            else:
-                label = f"{DAYS_SHORT[d.weekday()]} {d.day}"
-                if d.month != today.month:
-                    label += f" {MONTHS_SHORT[d.month - 1]}"
-            row.append(InlineKeyboardButton(
-                text=label,
-                callback_data=f"hw|cd|{hw_key}|{d.strftime('%Y%m%d')}",
-            ))
-            if len(row) == 3:
-                rows.append(row)
-                row = []
-        if row:
-            rows.append(row)
-
-    rows.append([InlineKeyboardButton(text="📆 Без даты", callback_data=f"hw|cd|{hw_key}|none")])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-def kb_pick_hw_day(entries: list[dict]) -> InlineKeyboardMarkup:
-    """
-    Личный сценарий: предмет найден в нескольких днях расписания.
-    Для каждого слота показываем 2 ближайшие даты.
-    Формат callback: hw|pick|{day}|{HH:MM}|{YYYYMMDD}
-    """
-    rows = []
-    for e in entries:
-        for dt in sched_module.future_lesson_datetimes(e["day_of_week"], e["start_time"], n=2):
-            date_str = f"{dt.day} {MONTHS_SHORT[dt.month - 1]}"
-            rows.append([InlineKeyboardButton(
-                text=f"{DAYS_RU[e['day_of_week']]} · {e['start_time']}  ({date_str})",
-                callback_data=f"hw|pick|{e['day_of_week']}|{e['start_time']}|{dt.strftime('%Y%m%d')}",
-            )])
     return InlineKeyboardMarkup(inline_keyboard=rows)

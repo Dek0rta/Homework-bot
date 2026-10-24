@@ -14,9 +14,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 
-from src.core import db
+from src.core import clock, db
 from src.services import timetable
 
 logger = logging.getLogger(__name__)
@@ -45,7 +45,8 @@ def _format_duration(minutes: int) -> str:
 
 def build_reminder(chat_id: int, user_id: int, target: date) -> str | None:
     """
-    Текст напоминания о заданиях на дату target.
+    Текст напоминания о заданиях на дату target: задания класса и личные
+    задания пользователя (они хранятся с chat_id = user_id).
     None — если напоминать не о чем: так пользователь не получает пустых
     сообщений и не отписывается из-за шума.
     """
@@ -57,9 +58,9 @@ def build_reminder(chat_id: int, user_id: int, target: date) -> str | None:
             "  FROM chat_homework h"
             "  LEFT JOIN user_homework_status s"
             "    ON s.homework_id = h.id AND s.user_id = ?"
-            " WHERE h.chat_id = ? AND h.due_date = ?"
+            " WHERE h.chat_id IN (?, ?) AND h.due_date = ?"
             " ORDER BY h.id",
-            (user_id, chat_id, target.isoformat()),
+            (user_id, chat_id, user_id, target.isoformat()),
         ).fetchall()
     finally:
         conn.close()
@@ -86,11 +87,15 @@ def build_reminder(chat_id: int, user_id: int, target: date) -> str | None:
 
     # Что завтра по расписанию — полезно рядом со списком заданий
     subgroup = db.get_user_subgroup(chat_id, user_id)
-    lessons  = timetable.lessons_on(chat_id, target, subgroup)
-    if lessons:
-        names = [l["subject"] for l in lessons if not l["is_cancelled"]]
-        if names:
-            lines.append(f"\n📅 <i>Уроки: {', '.join(names[:8])}</i>")
+    names = [
+        l["subject"] for l in timetable.lessons_on(chat_id, target, subgroup)
+        if not l["is_cancelled"]
+    ]
+    if not names:
+        # Класса нет — берём личное расписание
+        names = [e["subject"] for e in db.get_schedule(user_id) if e["day_of_week"] == target.weekday()]
+    if names:
+        lines.append(f"\n📅 <i>Уроки: {', '.join(names[:8])}</i>")
 
     lines.append("\n<i>Отключить — /reminders_off</i>")
     return "\n".join(lines)
@@ -101,7 +106,7 @@ async def send_due_reminders(bot) -> int:
     Отправляет напоминания тем, кому пора. Возвращает число отправленных.
     Вызывается планировщиком раз в минуту.
     """
-    now      = datetime.now()
+    now      = clock.now()
     now_hhmm = now.strftime("%H:%M")
     today    = now.date().isoformat()
     tomorrow = now.date() + timedelta(days=1)

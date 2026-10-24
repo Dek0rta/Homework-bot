@@ -30,10 +30,13 @@ GROUP_TYPES = {"group", "supergroup"}
 BTN_SCHEDULE     = "📅 Моё расписание"
 BTN_SET_SCHEDULE = "✏️ Изменить расписание"
 BTN_CALENDAR     = "🔗 Google Calendar"
+BTN_HOMEWORK     = "📋 Мои ДЗ"
 BTN_STATS        = "📊 Нагрузка"
 BTN_WEBAPP       = "🌐 Открыть приложение"
 
-BUTTON_TEXTS = {BTN_SCHEDULE, BTN_SET_SCHEDULE, BTN_CALENDAR, BTN_STATS}
+# BTN_CALENDAR в меню больше нет, но у пользователей может остаться старая
+# клавиатура — её нажатие не должно уходить в разбор ДЗ
+BUTTON_TEXTS = {BTN_SCHEDULE, BTN_SET_SCHEDULE, BTN_CALENDAR, BTN_HOMEWORK, BTN_STATS}
 
 
 def lesson_number(start_time: str) -> int:

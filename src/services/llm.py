@@ -1,152 +1,77 @@
 """
-Разбор домашних заданий через Mistral: текст (mistral-small) и фото (Pixtral).
+Промпты и разбор ответов модели: расписание, замены уроков, домашние задания.
+
+Какая модель отвечает — решает src/services/llm_providers.py. Здесь только
+что спросить и как прочитать ответ. Ответы запрашиваются строго по
+JSON-схеме, но модель всё равно может ошибиться в значениях, поэтому
+каждое поле дополнительно проверяется кодом.
 """
 
 from __future__ import annotations
 
-import asyncio
-import base64
 import json
 import logging
 import re
-from datetime import datetime
+from datetime import date, timedelta
+from typing import Literal, Sequence
 
-from mistralai import Mistral
-
-from src.core.config import MISTRAL_API_KEY
+from src.core import clock
+from src.services.llm_providers import ImageInput, get_router
 
 logger = logging.getLogger(__name__)
 
-_client = Mistral(api_key=MISTRAL_API_KEY)
+_DAYS_RU       = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+_DAYS_RU_FULL  = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"]
+_DAYS_RU_LOWER = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"]
 
-_TEXT_MODEL   = "mistral-small-latest"
-_VISION_MODEL = "pixtral-12b-2409"
-
-_DAYS_RU      = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
-_DAYS_RU_FULL = ["понедельник","вторник","среда","четверг","пятница","суббота","воскресенье"]
-
-
-def _today_ctx() -> str:
-    now = datetime.now()
-    return f"{_DAYS_RU_FULL[now.weekday()]}, {now.strftime('%d.%m.%Y')}"
+# Сколько дней вперёд показывать модели в календаре для перевода «на пятницу» в дату
+_CALENDAR_DAYS = 14
 
 
-_GROUP_JSON_HINT = """\
-Ответь СТРОГО одним из двух вариантов (без markdown, без пояснений):
-— Если ДЗ: {"subject":"...","task":"...","due_day":<0-6 или null>,"due_date":"<YYYY-MM-DD или null>","confidence":<0.0-1.0>}
-— Если НЕ ДЗ: null
-
-due_day: день недели из текста (0=Пн…6=Вс), null если не указан явно
-due_date: конкретная дата из текста в формате YYYY-MM-DD, null если не указана
-confidence: твоя уверенность в правильности определения предмета (0.0–1.0)\
-"""
-
-_GROUP_EXAMPLES = """\
-ПРИМЕРЫ — ЧТО ЯВЛЯЕТСЯ ДЗ:
-✅ «ДЗ по физике: §8 задачи 1-3»
-✅ «На пятницу выучить стихотворение (литература)»
-✅ «Математика — стр.45 упр.7, сдать в четверг»
-✅ «Не забудьте параграф 12 прочитать к завтрашнему уроку химии»
-
-ПРИМЕРЫ — ЧТО НЕ ЯВЛЯЕТСЯ ДЗ:
-❌ «Кто сделал домашку по математике?» — вопрос, не задание
-❌ «Завтра контрольная по физике» — объявление, не ДЗ
-❌ «Привет всем!» — переписка
-❌ «Спасибо за помощь» — переписка
-❌ «Кто придет на дополнительное занятие?» — вопрос
-❌ «Молодцы, все справились» — комментарий\
-"""
-
-_JSON_HINT = (
-    'Ответь СТРОГО в виде JSON-объекта без markdown-блоков:\n'
-    '{"subject": "...", "task": "...", "due_lesson_day": <0-6>, "due_lesson_time": "ЧЧ:ММ", "confidence": <0.0-1.0>}\n\n'
-    "due_lesson_day: 0=Пн, 1=Вт, 2=Ср, 3=Чт, 4=Пт, 5=Сб, 6=Вс\n"
-    "confidence: уверенность в правильности определения предмета (0.0–1.0)"
-)
-
-# Маркеры Английского языка — включаются в каждый промпт распознавания ДЗ
-_ENGLISH_MARKERS_HINT = """\
-ПРИОРИТЕТНОЕ ПРАВИЛО — «Английский язык»:
-Если в тексте или на изображении обнаружен хотя бы один из следующих маркеров,
-классифицируй предмет как «Английский язык» (если он есть в расписании):
-  • ex. / Ex. / exercise  — обозначение упражнения
-  • p. / pg. / page        — ссылка на страницу учебника
-  • H/W / HW               — аббревиатура Homework
-  • W/B / WB               — Workbook (рабочая тетрадь)
-  • S/B / SB               — Student's Book
-  • Unit / unit            — раздел англоязычного учебника
-  • Vocabulary / vocab     — словарный запас
-
-Исключение (Английский vs Математика):
-Если одновременно есть маркеры p./ex. И математические формулы:
-  — Основной текст на английском языке → «Английский язык»
-  — Только цифры и математические символы без английских слов → «Математика»/«Алгебра»/«Геометрия»\
-"""
+class LLMBadResponse(ValueError):
+    """Модель ответила, но ответ не удалось разобрать."""
 
 
-def _format_schedule(schedule: list[dict]) -> str:
+def _today_ctx(today: date | None = None) -> str:
+    today = today or clock.today()
+    return f"{_DAYS_RU_FULL[today.weekday()]}, {today.strftime('%d.%m.%Y')}"
+
+
+def _calendar(today: date) -> str:
+    """Ближайшие дни с датами — модель хуже считает даты, чем читает их из списка."""
     lines = []
-    for e in schedule:
-        day_name = _DAYS_RU[e["day_of_week"]]
-        lines.append(f"{day_name}: {e['subject']} {e['start_time']}")
+    for offset in range(_CALENDAR_DAYS):
+        d = today + timedelta(days=offset)
+        line = f"{_DAYS_RU_LOWER[d.weekday()]} {d.strftime('%d.%m')} → {d.isoformat()}"
+        if offset == 0:
+            line += " (сегодня)"
+        elif offset == 1:
+            line += " (завтра)"
+        lines.append(line)
     return "\n".join(lines)
 
 
 def _extract_json(raw: str) -> dict:
-    match = re.search(r"\{.*\}", raw, re.DOTALL)
+    """JSON-объект из ответа модели, даже если он обёрнут в markdown или текст."""
+    text = raw.strip()
+    try:
+        data = json.loads(text)
+        if isinstance(data, dict):
+            return data
+    except json.JSONDecodeError:
+        pass
+    match = re.search(r"\{.*\}", text, re.DOTALL)
     if not match:
-        raise ValueError(f"Не удалось найти JSON в ответе: {raw[:200]}")
-    return json.loads(match.group())
-
-
-# Ответ модели ждём не дольше этого: зависший запрос иначе держит хендлер
-# бессрочно, и пользователь не получает ни ответа, ни ошибки.
-_REQUEST_TIMEOUT_SECONDS = 60
-
-
-def _is_retriable(exc: Exception) -> bool:
-    """
-    Стоит ли повторить запрос. Помимо 429 повторяем таймауты, обрывы связи и
-    5xx — раньше они падали с первой попытки, хотя это временные сбои.
-    """
-    if isinstance(exc, (asyncio.TimeoutError, ConnectionError, OSError)):
-        return True
-    status = getattr(exc, "status_code", None)
-    if isinstance(status, int):
-        return status == 429 or 500 <= status < 600
-    text = str(exc)
-    return any(marker in text for marker in ("429", "500", "502", "503", "504", "timeout", "Timeout"))
-
-
-async def _chat(messages: list[dict], model: str, max_retries: int = 4) -> str:
-    """Запрос к Mistral с таймаутом и повтором при временных сбоях."""
-    for attempt in range(max_retries):
-        try:
-            response = await asyncio.wait_for(
-                _client.chat.complete_async(
-                    model=model,
-                    messages=messages,
-                    temperature=0.1,
-                ),
-                timeout=_REQUEST_TIMEOUT_SECONDS,
-            )
-            return response.choices[0].message.content.strip()
-        except Exception as e:
-            if _is_retriable(e) and attempt < max_retries - 1:
-                wait = 2 ** attempt
-                logger.warning(
-                    "Mistral: временный сбой (%s), повтор через %ds (попытка %d)",
-                    type(e).__name__, wait, attempt + 1,
-                )
-                await asyncio.sleep(wait)
-            else:
-                raise
-    raise RuntimeError("unreachable: цикл повторов завершился без ответа и без исключения")
+        raise LLMBadResponse(f"Не удалось найти JSON в ответе: {raw[:200]}")
+    try:
+        return json.loads(match.group())
+    except json.JSONDecodeError as e:
+        raise LLMBadResponse(f"Битый JSON в ответе: {raw[:200]}") from e
 
 
 async def ask_text(prompt: str) -> str:
-    """Публичный однократный текстовый запрос к LLM. Возвращает сырой ответ модели."""
-    return await _chat([{"role": "user", "content": prompt}], _TEXT_MODEL)
+    """Однократный текстовый запрос к быстрой модели. Возвращает сырой ответ."""
+    return await get_router().complete(prompt, tier="fast", max_tokens=300)
 
 
 # ── Распознавание расписания ─────────────────────────────────────────────────
@@ -351,83 +276,46 @@ def _normalize_schedule(data: dict) -> dict:
     return {"lessons": lessons, "confidence": max(0.0, min(1.0, confidence))}
 
 
-async def parse_schedule_image(image_path: str) -> dict:
+_SCHEDULE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "lessons": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "day":         {"type": "integer"},
+                    "slot":        {"type": "integer"},
+                    "subject":     {"type": "string"},
+                    "subgroup":    {"type": "integer"},
+                    "week_parity": {"type": "string"},
+                },
+                "required": ["day", "slot", "subject", "subgroup", "week_parity"],
+                "additionalProperties": False,
+            },
+        },
+        "confidence": {"type": "number"},
+    },
+    "required": ["lessons", "confidence"],
+    "additionalProperties": False,
+}
+
+
+async def parse_schedule_image(image: ImageInput) -> dict:
     """
     Распознаёт расписание на фото.
-    Возвращает {"lessons": [{"day", "slot", "subject"}], "confidence": float}.
+    Возвращает {"lessons": [{"day", "slot", "subject", ...}], "confidence": float}.
     Пустой список lessons означает, что расписание не распознано.
     """
-    with open(image_path, "rb") as f:
-        image_b64 = base64.b64encode(f.read()).decode("utf-8")
-
-    mime = "image/png" if image_path.lower().endswith(".png") else "image/jpeg"
-    messages = [{
-        "role": "user",
-        "content": [
-            {"type": "text",      "text": _SCHEDULE_PROMPT},
-            {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{image_b64}"}},
-        ],
-    }]
-
-    raw = await _chat(messages, _VISION_MODEL)
+    raw = await get_router().complete(
+        _SCHEDULE_PROMPT, tier="smart", images=[image], schema=_SCHEDULE_SCHEMA, max_tokens=4000,
+    )
     logger.debug("Schedule image raw: %s", raw)
     try:
         return _normalize_schedule(_extract_json(raw))
     except Exception:
         logger.warning("Не удалось разобрать расписание из ответа модели")
         return {"lessons": [], "confidence": 0.0}
-
-
-_OVERRIDE_HINT = """\
-Ответь СТРОГО одним из двух вариантов, без markdown:
-— Если это замена или отмена урока:
-  {"date":"<YYYY-MM-DD>","slot":<1-8 или null>,"old_subject":"<или null>","new_subject":"<или null>","cancelled":<true|false>,"confidence":<0.0-1.0>}
-— Если сообщение не про замену: null
-
-date:        конкретная дата. «завтра», «в понедельник» — переведи в дату.
-slot:        номер урока, если указан явно («вместо 3 урока»). Иначе null.
-old_subject: какой урок заменяют или отменяют. Иначе null.
-new_subject: чем заменяют. При отмене — null.
-cancelled:   true если урок отменён/его не будет, без замены другим.\
-"""
-
-_OVERRIDE_EXAMPLES = """\
-ПРИМЕРЫ — ЭТО ЗАМЕНА:
-✅ «Завтра вместо физики будет история»
-✅ «Химии не будет в пятницу»
-✅ «3 урок отменили»
-✅ «В понедельник физру заменят на математику»
-
-ПРИМЕРЫ — ЭТО НЕ ЗАМЕНА:
-❌ «ДЗ по физике параграф 8» — домашнее задание
-❌ «А что завтра по расписанию?» — вопрос
-❌ «Физика была сложная» — обсуждение
-❌ «Кто идёт на физру?» — вопрос\
-"""
-
-
-async def detect_schedule_override(text: str, subjects: list[str]) -> dict | None:
-    """
-    Ищет в сообщении замену или отмену урока. Возвращает dict или None.
-
-    Замены объявляют в том же чате, что и ДЗ, поэтому дешевле распознать их
-    на лету, чем заставлять кого-то редактировать расписание вручную.
-    """
-    prompt = (
-        "Ты определяешь, сообщает ли текст о замене или отмене урока.\n\n"
-        "Сегодня: " + _today_ctx() + "\n"
-        "Предметы класса: " + ", ".join(subjects) + "\n\n"
-        + _OVERRIDE_EXAMPLES + "\n\n"
-        "Сообщение:\n«" + text + "»\n\n"
-        + _OVERRIDE_HINT
-    )
-    raw = await _chat([{"role": "user", "content": prompt}], _TEXT_MODEL)
-    logger.debug("Override detect raw: %s", raw)
-
-    result = _parse_group_result(raw)
-    if not result or not result.get("date"):
-        return None
-    return result
 
 
 async def parse_schedule_text(text: str) -> dict:
@@ -438,7 +326,7 @@ async def parse_schedule_text(text: str) -> dict:
         + "\n\nТекст:\n"
         + text
     )
-    raw = await _chat([{"role": "user", "content": prompt}], _TEXT_MODEL)
+    raw = await get_router().complete(prompt, tier="smart", schema=_SCHEDULE_SCHEMA, max_tokens=4000)
     logger.debug("Schedule text raw: %s", raw)
     try:
         return _normalize_schedule(_extract_json(raw))
@@ -447,117 +335,250 @@ async def parse_schedule_text(text: str) -> dict:
         return {"lessons": [], "confidence": 0.0}
 
 
-async def parse_homework_text(text: str, schedule: list[dict]) -> dict:
-    """Парсит ДЗ из текста. Промпт строится конкатенацией — безопасно для любого текста."""
+# ── Замены и отмены уроков ───────────────────────────────────────────────────
+
+_OVERRIDE_RULES = """\
+is_override: true — если сообщение объявляет замену или отмену урока, иначе false.
+date:        конкретная дата YYYY-MM-DD. «Завтра», «в понедельник» — переведи по календарю.
+slot:        номер урока, если указан явно («вместо 3 урока»). Иначе null.
+old_subject: какой урок заменяют или отменяют. Иначе null.
+new_subject: чем заменяют. При отмене — null.
+cancelled:   true, если урок отменён и ничем не заменён.
+
+ЭТО ЗАМЕНА:
+✅ «Завтра вместо физики будет история»
+✅ «Химии не будет в пятницу»
+✅ «3 урок отменили»
+✅ «В понедельник физру заменят на математику»
+
+ЭТО НЕ ЗАМЕНА:
+❌ «ДЗ по физике параграф 8» — домашнее задание
+❌ «А что завтра по расписанию?» — вопрос
+❌ «Физика была сложная» — обсуждение
+❌ «Кто идёт на физру?» — вопрос\
+"""
+
+_OVERRIDE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "is_override": {"type": "boolean"},
+        "date":        {"type": ["string", "null"]},
+        "slot":        {"type": ["integer", "null"]},
+        "old_subject": {"type": ["string", "null"]},
+        "new_subject": {"type": ["string", "null"]},
+        "cancelled":   {"type": "boolean"},
+        "confidence":  {"type": "number"},
+    },
+    "required": ["is_override", "date", "slot", "old_subject", "new_subject", "cancelled", "confidence"],
+    "additionalProperties": False,
+}
+
+
+async def detect_schedule_override(text: str, subjects: list[str]) -> dict | None:
+    """
+    Ищет в сообщении замену или отмену урока. Возвращает dict или None.
+
+    Замены объявляют в том же чате, что и ДЗ, поэтому дешевле распознать их
+    на лету, чем заставлять кого-то редактировать расписание вручную.
+    """
+    today  = clock.today()
     prompt = (
-        "Ты помощник школьника. Тебе дан текст с домашним заданием и расписание уроков.\n\n"
-        "Расписание (формат «День: Предмет ЧЧ:ММ»):\n"
-        + _format_schedule(schedule)
-        + "\n\n"
-        + _ENGLISH_MARKERS_HINT
-        + "\n\nТекст домашнего задания:\n"
-        + text
-        + "\n\nЗадача:\n"
-        "1. Определи предмет из расписания (subject). Обяза­тельно применяй правила выше для маркеров Английского.\n"
-        "2. Извлеки краткое описание задания (task).\n"
-        "3. Найди ближайший следующий урок по этому предмету (due_lesson_day, due_lesson_time).\n"
-        "4. Укажи confidence — твою уверенность в предмете.\n\n"
-        + _JSON_HINT
+        "Ты определяешь, сообщает ли текст из школьного чата о замене или отмене урока.\n\n"
+        "Сегодня: " + _today_ctx(today) + "\n"
+        "Календарь:\n" + _calendar(today) + "\n\n"
+        "Предметы класса: " + ", ".join(subjects) + "\n\n"
+        + _OVERRIDE_RULES + "\n\n"
+        "Сообщение:\n«" + text + "»"
     )
-    raw = await _chat([{"role": "user", "content": prompt}], _TEXT_MODEL)
-    logger.debug("Mistral raw: %s", raw)
-    return _extract_json(raw)
+    raw = await get_router().complete(prompt, tier="fast", schema=_OVERRIDE_SCHEMA, max_tokens=300)
+    logger.debug("Override detect raw: %s", raw)
 
-
-def _parse_group_result(raw: str) -> dict | None:
-    """null → None, JSON → dict с нормализованными полями."""
-    raw = raw.strip()
-    if raw.lower() in ("null", "none", ""):
-        return None
     try:
         data = _extract_json(raw)
-        if str(data.get("due_day",  "")).lower() == "null": data["due_day"]  = None
-        if str(data.get("due_date", "")).lower() == "null": data["due_date"] = None
-        return data
-    except Exception:
-        # Модель вернула не-JSON. Для вызывающего это неотличимо от «не ДЗ»,
-        # поэтому пишем в лог — иначе сбой парсинга не найти.
-        logger.warning("Не удалось разобрать ответ модели: %s", raw[:200])
+    except LLMBadResponse:
+        logger.warning("Не удалось разобрать ответ о замене: %s", raw[:200])
         return None
 
+    if not data.get("is_override") or not data.get("date"):
+        return None
+    return data
 
-async def detect_group_homework(text: str, subjects: list[str]) -> dict | None:
-    """Определяет ДЗ в тексте группового чата. Возвращает dict или None."""
-    prompt = (
-        "Ты определяешь, является ли сообщение из школьного чата домашним заданием.\n\n"
-        "Сегодня: " + _today_ctx() + "\n"
-        "Предметы класса: " + ", ".join(subjects) + "\n\n"
+
+# ── Домашние задания ─────────────────────────────────────────────────────────
+
+HomeworkSource = Literal["private", "chat"]
+
+# Маркеры английского — ученики пишут сокращениями из учебника
+_ENGLISH_MARKERS_HINT = """\
+АНГЛИЙСКИЙ ЯЗЫК. Если в задании есть ex., exercise, p., pg., page, H/W, HW,
+W/B, WB, S/B, SB, Unit, Vocabulary — это «Английский язык» (если он есть
+в расписании). Исключение: только цифры и формулы без английских слов —
+это математика.\
+"""
+
+_HOMEWORK_RULES = """\
+ПРАВИЛА
+1. Найди ВСЕ домашние задания. Одно задание — один предмет: несколько пунктов
+   по одному предмету объединяй в одно задание через запятую.
+2. subject — название из списка предметов, если оно подходит
+   («Англ.», «англ яз» → «Английский язык»; «алгебра» → «Алгебра»).
+   Если предмета нет в списке — полное название, как в источнике.
+3. task — что сделать: кратко, но со ВСЕМИ номерами, страницами, параграфами,
+   упражнениями. Без слов «ДЗ», «задали» и без названия предмета.
+4. due_date — к какой дате сделать, в формате YYYY-MM-DD по календарю выше.
+   Ставь, только если срок указан явно: «на пятницу», «к 15.11», «на завтра»,
+   «к понедельнику». Срок не указан или «к следующему уроку» → null.
+5. Страница бумажного дневника или скриншот электронного: задание записано
+   в строке того дня, НА КОТОРЫЙ его задали. Дата или день недели этой строки
+   и есть due_date.
+6. confidence — насколько уверенно прочитано задание, от 0.0 до 1.0.
+   Неразборчивый почерк, обрезанный текст, догадка → меньше 0.6.
+7. Ничего не выдумывай. Нет домашнего задания — пустой список items.\
+"""
+
+_CHAT_EXAMPLES = """\
+Это сообщение из общего чата класса — там в основном переписка.
+
+ЭТО ДОМАШНЕЕ ЗАДАНИЕ:
+✅ «ДЗ по физике: §8 задачи 1-3»
+✅ «На пятницу выучить стихотворение (литература)»
+✅ «Математика — стр.45 упр.7, сдать в четверг»
+✅ «Не забудьте параграф 12 прочитать к завтрашнему уроку химии»
+
+ЭТО НЕ ДОМАШНЕЕ ЗАДАНИЕ (items пустой):
+❌ «Кто сделал домашку по математике?» — вопрос
+❌ «Завтра контрольная по физике» — объявление
+❌ «Привет всем!», «Спасибо за помощь» — переписка
+❌ «Молодцы, все справились» — комментарий\
+"""
+
+_HOMEWORK_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "items": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "subject":    {"type": "string"},
+                    "task":       {"type": "string"},
+                    "due_date":   {"type": ["string", "null"]},
+                    "confidence": {"type": "number"},
+                },
+                "required": ["subject", "task", "due_date", "confidence"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["items"],
+    "additionalProperties": False,
+}
+
+
+def build_homework_prompt(
+    text: str,
+    image_count: int,
+    subjects: Sequence[str],
+    today: date,
+    source: HomeworkSource,
+) -> str:
+    """Промпт разбора ДЗ. Строится конкатенацией — безопасно для любого текста."""
+    if subjects:
+        subjects_line = "Предметы в расписании: " + ", ".join(subjects)
+    else:
+        subjects_line = "Расписание не задано — пиши предмет полным названием, как в источнике."
+
+    if source == "chat":
+        intro = _CHAT_EXAMPLES
+    else:
+        intro = (
+            "Ученик прислал своё домашнее задание: текст и/или фото — дневник, доска, "
+            "тетрадь, учебник, скриншот из чата или электронного дневника."
+        )
+
+    if text.strip():
+        material = "Текст сообщения:\n«" + text.strip() + "»"
+    else:
+        material = "Текста нет — только фото."
+    if image_count:
+        material += f"\nФото в сообщении: {image_count} (они выше)."
+
+    return (
+        "Ты помогаешь школьнику вести домашние задания.\n\n"
+        "Сегодня: " + _today_ctx(today) + "\n"
+        "Календарь (день → дата для due_date):\n" + _calendar(today) + "\n\n"
+        + subjects_line + "\n\n"
+        + intro + "\n\n"
+        + _HOMEWORK_RULES + "\n\n"
         + _ENGLISH_MARKERS_HINT + "\n\n"
-        + _GROUP_EXAMPLES + "\n\n"
-        "Сообщение для анализа:\n«" + text + "»\n\n"
-        + _GROUP_JSON_HINT
-    )
-    raw = await _chat([{"role": "user", "content": prompt}], _TEXT_MODEL)
-    logger.debug("Group detect raw: %s", raw)
-    return _parse_group_result(raw)
-
-
-async def detect_group_homework_image(image_path: str, subjects: list[str]) -> dict | None:
-    """Определяет ДЗ на фото из группы. Возвращает dict или None."""
-    with open(image_path, "rb") as f:
-        image_b64 = base64.b64encode(f.read()).decode("utf-8")
-    mime = "image/png" if image_path.lower().endswith(".png") else "image/jpeg"
-    prompt = (
-        "Ты определяешь, содержит ли изображение домашнее задание из школы.\n\n"
-        "Сегодня: " + _today_ctx() + "\n"
-        "Предметы класса: " + ", ".join(subjects) + "\n\n"
-        + _ENGLISH_MARKERS_HINT + "\n\n"
-        "Прочитай весь текст на изображении. "
-        "Это домашнее задание по одному из предметов?\n\n"
-        + _GROUP_JSON_HINT
-    )
-    messages = [{
-        "role": "user",
-        "content": [
-            {"type": "text",      "text": prompt},
-            {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{image_b64}"}},
-        ],
-    }]
-    raw = await _chat(messages, _VISION_MODEL)
-    logger.debug("Group image detect raw: %s", raw)
-    return _parse_group_result(raw)
-
-
-async def parse_homework_image(image_path: str, schedule: list[dict]) -> dict:
-    """Читает изображение и парсит ДЗ."""
-    with open(image_path, "rb") as f:
-        image_b64 = base64.b64encode(f.read()).decode("utf-8")
-
-    mime = "image/png" if image_path.lower().endswith(".png") else "image/jpeg"
-    prompt = (
-        "Ты помощник школьника. На изображении записано домашнее задание.\n\n"
-        "Расписание уроков (формат «День: Предмет ЧЧ:ММ»):\n"
-        + _format_schedule(schedule)
-        + "\n\n"
-        + _ENGLISH_MARKERS_HINT
-        + "\n\nЗадача:\n"
-        "1. Прочитай весь текст на изображении.\n"
-        "2. Определи предмет из расписания (subject). Обяза­тельно применяй правила выше для маркеров Английского.\n"
-        "3. Извлеки краткое описание задания (task).\n"
-        "4. Найди ближайший следующий урок по этому предмету (due_lesson_day, due_lesson_time).\n"
-        "5. Укажи confidence — твою уверенность в предмете.\n\n"
-        + _JSON_HINT
+        + material
     )
 
-    messages = [{
-        "role": "user",
-        "content": [
-            {"type": "text",      "text": prompt},
-            # image_url должен быть dict с ключом url (Mistral API v1+)
-            {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{image_b64}"}},
-        ],
-    }]
 
-    raw = await _chat(messages, _VISION_MODEL)
-    logger.debug("Mistral raw: %s", raw)
-    return _extract_json(raw)
+def normalize_homework(data: dict) -> list[dict]:
+    """
+    Приводит ответ модели к списку {"subject", "task", "due_date", "confidence"}.
+    Записи без текста задания отбрасываются; due_date остаётся сырой строкой —
+    её проверяет и переводит в дату код, а не модель.
+    """
+    items = data.get("items")
+    if not isinstance(items, list):
+        return []
+
+    result = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        task    = str(item.get("task") or "").strip()
+        subject = str(item.get("subject") or "").strip()
+        if not task:
+            continue
+
+        due = item.get("due_date")
+        due = str(due).strip() if due not in (None, "", "null") else None
+
+        try:
+            confidence = float(item.get("confidence", 0.7))
+        except (TypeError, ValueError):
+            confidence = 0.7
+
+        result.append({
+            "subject":    subject,
+            "task":       task,
+            "due_date":   due,
+            "confidence": max(0.0, min(1.0, confidence)),
+        })
+    return result
+
+
+async def extract_homework(
+    *,
+    text: str = "",
+    images: Sequence[ImageInput] = (),
+    subjects: Sequence[str] = (),
+    today: date | None = None,
+    source: HomeworkSource = "private",
+) -> list[dict]:
+    """
+    Все домашние задания из сообщения: текста и любого числа фото.
+
+    Личные ДЗ разбирает самая точная модель. В чате класса сообщений много,
+    поэтому текст идёт в быструю модель, фото — в модель со зрением попроще.
+
+    Бросает LLMUnavailable, если модели недоступны, и LLMBadResponse,
+    если ответ не разобрать, — вызывающий должен сказать об этом человеку,
+    а не делать вид, что заданий нет.
+    """
+    today  = today or clock.today()
+    prompt = build_homework_prompt(text, len(images), subjects, today, source)
+
+    if source == "private":
+        tier = "smart"
+    else:
+        tier = "vision" if images else "fast"
+
+    raw = await get_router().complete(
+        prompt, tier=tier, images=images, schema=_HOMEWORK_SCHEMA, max_tokens=2000,
+    )
+    logger.debug("Homework raw (%s): %s", source, raw)
+    return normalize_homework(_extract_json(raw))
