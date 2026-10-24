@@ -10,6 +10,33 @@ MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
 ADMIN_USER_ID   = int(os.getenv("ADMIN_USER_ID", 0))
 TIMEZONE        = os.getenv("TIMEZONE", "Europe/Moscow")
 
+_ROOT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# ── Языковые модели ──────────────────────────────────────────────────────────
+# Порядок провайдеров: первый — основной, остальные подхватывают при его сбое.
+# Провайдер без ключа пропускается.
+LLM_PROVIDERS = [
+    p.strip().lower()
+    for p in os.getenv("LLM_PROVIDERS", "gigachat,mistral").split(",")
+    if p.strip()
+]
+
+# GigaChat: ключ авторизации из личного кабинета developers.sber.ru
+GIGACHAT_CREDENTIALS  = os.getenv("GIGACHAT_CREDENTIALS")
+GIGACHAT_SCOPE        = os.getenv("GIGACHAT_SCOPE", "GIGACHAT_API_PERS")
+GIGACHAT_MODEL        = os.getenv("GIGACHAT_MODEL", "GigaChat-2-Max")      # личные ДЗ, расписание
+GIGACHAT_FAST_MODEL   = os.getenv("GIGACHAT_FAST_MODEL", "GigaChat-2")     # переписка чата, только текст
+GIGACHAT_VISION_MODEL = os.getenv("GIGACHAT_VISION_MODEL", "GigaChat-2-Pro")  # фото из чата класса
+# Сертификаты Сбера выпущены НУЦ Минцифры — в стандартном наборе их нет
+GIGACHAT_CA_BUNDLE    = os.getenv(
+    "GIGACHAT_CA_BUNDLE",
+    os.path.join(_ROOT_DIR, "certs", "russian_trusted_root_ca.pem"),
+)
+
+# Mistral: запасной провайдер. На бесплатном тарифе доступны только ministral-*
+MISTRAL_MODEL      = os.getenv("MISTRAL_MODEL", "ministral-14b-latest")
+MISTRAL_FAST_MODEL = os.getenv("MISTRAL_FAST_MODEL", MISTRAL_MODEL)
+
 # Календарь выбирается на пользователя и хранится в user_calendar_tokens.
 # TOKEN_PATH ниже остаётся только ради миграции старого общего токена.
 

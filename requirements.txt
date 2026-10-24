@@ -5,8 +5,12 @@ aiofiles>=23.2.1
 # HTTP-сервер: health-check + REST API для WebApp
 aiohttp>=3.9.0
 
-# LLM: разбор ДЗ из текста и фото (Mistral + Pixtral)
+# LLM: разбор ДЗ из текста и фото. GigaChat — основной, Mistral — запасной
+gigachat>=0.2.3,<0.3
 mistralai>=1.9,<2.0
+
+# Перекодирование изображений (webp, heic → jpeg) перед отправкой в модель
+pillow>=10.0
 
 # Google Calendar
 google-api-python-client>=2.134.0

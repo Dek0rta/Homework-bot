@@ -6,13 +6,13 @@ import pytest
 
 from src.core.startup_checks import ConfigError, run_startup_checks
 
-REQUIRED = {"BOT_TOKEN": "123:abc", "MISTRAL_API_KEY": "key"}
+REQUIRED = {"BOT_TOKEN": "123:abc", "GIGACHAT_CREDENTIALS": "key"}
 
 
 @pytest.fixture
 def env(monkeypatch):
     """Чистое окружение, в которое тест докладывает только нужное."""
-    for key in ("BOT_TOKEN", "MISTRAL_API_KEY", "WEB_APP_URL",
+    for key in ("BOT_TOKEN", "MISTRAL_API_KEY", "GIGACHAT_CREDENTIALS", "WEB_APP_URL",
                 "ADMIN_USER_ID", "ALLOW_UNSIGNED_WEBAPP"):
         monkeypatch.delenv(key, raising=False)
     return monkeypatch
@@ -25,15 +25,31 @@ def test_passes_with_required_vars(env):
 
 
 def test_missing_bot_token_fails(env):
-    env.setenv("MISTRAL_API_KEY", "key")
+    env.setenv("GIGACHAT_CREDENTIALS", "key")
     with pytest.raises(ConfigError, match="BOT_TOKEN"):
         run_startup_checks()
 
 
-def test_missing_mistral_key_fails(env):
+def test_missing_all_llm_keys_fails(env):
     env.setenv("BOT_TOKEN", "123:abc")
-    with pytest.raises(ConfigError, match="MISTRAL_API_KEY"):
+    with pytest.raises(ConfigError, match="GIGACHAT_CREDENTIALS"):
         run_startup_checks()
+
+
+@pytest.mark.parametrize("key", ["GIGACHAT_CREDENTIALS", "MISTRAL_API_KEY"])
+def test_any_single_llm_key_is_enough(env, key):
+    """Хватает любого провайдера: второй — только запасной."""
+    env.setenv("BOT_TOKEN", "123:abc")
+    env.setenv(key, "key")
+    run_startup_checks()
+
+
+def test_mistral_only_warns_about_quality(env, caplog):
+    env.setenv("BOT_TOKEN", "123:abc")
+    env.setenv("MISTRAL_API_KEY", "key")
+    with caplog.at_level("WARNING"):
+        run_startup_checks()
+    assert "GIGACHAT_CREDENTIALS" in caplog.text
 
 
 def test_error_lists_all_missing_vars(env):
@@ -41,6 +57,7 @@ def test_error_lists_all_missing_vars(env):
         run_startup_checks()
     message = str(exc.value)
     assert "BOT_TOKEN" in message
+    assert "GIGACHAT_CREDENTIALS" in message
     assert "MISTRAL_API_KEY" in message
 
 

@@ -27,8 +27,11 @@ def _check_critical() -> list[str]:
     if not os.getenv("BOT_TOKEN"):
         problems.append("BOT_TOKEN не задан — бот не сможет подключиться к Telegram")
 
-    if not os.getenv("MISTRAL_API_KEY"):
-        problems.append("MISTRAL_API_KEY не задан — распознавание ДЗ работать не будет")
+    if not os.getenv("GIGACHAT_CREDENTIALS") and not os.getenv("MISTRAL_API_KEY"):
+        problems.append(
+            "Не задан ни GIGACHAT_CREDENTIALS, ни MISTRAL_API_KEY — "
+            "распознавание ДЗ работать не будет"
+        )
 
     return problems
 
@@ -52,6 +55,16 @@ def _check_warnings() -> list[str]:
         warnings.append(
             "ALLOW_UNSIGNED_WEBAPP включён: REST API принимает любой user_id "
             "без проверки подписи. Допустимо только для локальной разработки."
+        )
+
+    if not os.getenv("GIGACHAT_CREDENTIALS"):
+        warnings.append(
+            "GIGACHAT_CREDENTIALS не задан — ДЗ разбирает запасная модель Mistral, "
+            "она заметно хуже читает фото и путает даты"
+        )
+    elif not os.getenv("MISTRAL_API_KEY"):
+        warnings.append(
+            "MISTRAL_API_KEY не задан — при сбое GigaChat подменить его будет нечем"
         )
 
     if not os.getenv("ADMIN_USER_ID"):
