@@ -9,8 +9,10 @@ services:
     envVars:
       - key: BOT_TOKEN
         sync: false        # задать вручную в Render Dashboard
-      - key: MISTRAL_API_KEY
+      - key: GIGACHAT_CREDENTIALS
         sync: false
+      - key: MISTRAL_API_KEY
+        sync: false        # запасная модель
       - key: ADMIN_USER_ID
         sync: false
       - key: TIMEZONE
